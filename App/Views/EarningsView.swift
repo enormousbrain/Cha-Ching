@@ -6,41 +6,39 @@ struct EarningsView: View {
     var allowsBonusActions: Bool = false
     @State private var showingBonusSheet = false
     @State private var showingMessageComposer = false
+    @State private var selectedSection: EarningsSection
+
+    private enum EarningsSection: String, CaseIterable, Identifiable {
+        case current = "Current"
+        case history = "History"
+
+        var id: String { rawValue }
+    }
+
+    init(allowsBonusActions: Bool = false) {
+        self.allowsBonusActions = allowsBonusActions
+        let launchSection = ProcessInfo.processInfo.environment["CHACHING_EARNINGS_SECTION"]
+        _selectedSection = State(
+            initialValue: launchSection == "history" ? .history : .current
+        )
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                AllowanceCard(summary: store.allowanceSummary, periodTitle: store.allowancePeriodTitle, compact: true)
-
-                summaryRows
-
-                if !allowsBonusActions {
-                    AllowanceRequestCard(
-                        summary: store.allowanceSummary,
-                        nextAllowanceDate: store.nextAllowanceDate,
-                        messageBody: store.allowanceRequestMessage
-                    ) {
-                        showingMessageComposer = true
+                Picker("Earnings view", selection: $selectedSection) {
+                    ForEach(EarningsSection.allCases) { section in
+                        Text(section.rawValue).tag(section)
                     }
                 }
+                .pickerStyle(.segmented)
 
-                if allowsBonusActions {
-                    Button {
-                        showingBonusSheet = true
-                    } label: {
-                        Label("Add Bonus", systemImage: "plus.circle.fill")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 52)
-                            .foregroundStyle(Color.brandBlack)
-                            .background(Color.acidLime, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
+                switch selectedSection {
+                case .current:
+                    currentPeriodContent
+                case .history:
+                    AllowanceHistoryView(periods: store.archivedAllowancePeriods)
                 }
-
-                dailyBreakdown
-
-                ledgerList
             }
             .padding(22)
         }
@@ -56,88 +54,380 @@ struct EarningsView: View {
         }
     }
 
-    private var summaryRows: some View {
-        VStack(spacing: 0) {
-            EarningsRow(title: "Starting allowance", value: Money.dollars(store.allowanceSummary.weeklyBaseCents), color: .inkBlack)
-            EarningsRow(title: "Deductions", value: Money.dollars(-store.allowanceSummary.activeDeductionCents, signed: true), color: .warmOrange)
-            EarningsRow(title: "Bonuses", value: Money.dollars(store.allowanceSummary.bonusCents, signed: true), color: .green)
-            EarningsRow(title: "Adjustments", value: Money.dollars(store.allowanceSummary.adjustmentCents, signed: true), color: .mutedGray)
-            if store.allowanceSummary.hasRolloverDebt {
-                EarningsRow(title: "Rollover next period", value: Money.dollars(-store.allowanceSummary.rolloverDebtCents, signed: true), color: .warmOrange)
+    @ViewBuilder
+    private var currentPeriodContent: some View {
+        if let period = store.activeAllowancePeriod {
+            AllowanceCard(
+                summary: store.allowanceSummary,
+                periodTitle: store.allowancePeriodTitle,
+                compact: true
+            )
+
+            PeriodDateRange(period: period)
+            AllowanceSummaryRows(summary: store.allowanceSummary)
+
+            if !allowsBonusActions {
+                AllowanceRequestCard(
+                    summary: store.allowanceSummary,
+                    nextAllowanceDate: store.nextAllowanceDate,
+                    messageBody: store.allowanceRequestMessage
+                ) {
+                    showingMessageComposer = true
+                }
+            }
+
+            if allowsBonusActions {
+                Button {
+                    showingBonusSheet = true
+                } label: {
+                    Label("Add Bonus", systemImage: "plus.circle.fill")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 52)
+                        .foregroundStyle(Color.brandBlack)
+                        .background(Color.acidLime, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+
+            AllowanceDailyActivityView(period: period)
+            AllowanceLedgerView(entries: store.ledger)
+        } else {
+            ContentUnavailableView(
+                "No Allowance Period",
+                systemImage: "calendar.badge.exclamationmark",
+                description: Text("Pull to refresh after your family finishes setup.")
+            )
+        }
+    }
+}
+
+private struct AllowanceHistoryView: View {
+    var periods: [AllowancePeriod]
+    @State private var showingFirstPeriodForQA = ProcessInfo.processInfo.environment["CHACHING_EARNINGS_DETAIL"] == "1"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Past Periods")
+                    .font(.title3.weight(.heavy))
+                Spacer()
+                Text("\(periods.count)")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(Color.mutedGray)
+            }
+
+            if periods.isEmpty {
+                ContentUnavailableView(
+                    "No History Yet",
+                    systemImage: "clock.arrow.circlepath",
+                    description: Text("Completed allowance periods will appear here.")
+                )
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 36)
+                .background(Color.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            } else {
+                ForEach(periods) { period in
+                    NavigationLink {
+                        AllowancePeriodDetailView(period: period)
+                    } label: {
+                        AllowancePeriodHistoryRow(period: period)
+                    }
+                    .buttonStyle(.plain)
+                }
             }
         }
-        .background(Color.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .navigationDestination(isPresented: $showingFirstPeriodForQA) {
+            if let period = periods.first {
+                AllowancePeriodDetailView(period: period)
+            }
+        }
+        .onAppear {
+            if periods.isEmpty {
+                showingFirstPeriodForQA = false
+            }
+        }
+    }
+}
+
+private struct AllowancePeriodHistoryRow: View {
+    var period: AllowancePeriod
+
+    var body: some View {
+        HStack(spacing: 14) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(periodDateRange(period))
+                    .font(.headline)
+                    .foregroundStyle(Color.inkBlack)
+
+                Text(periodActivitySummary(period.summary))
+                    .font(.caption)
+                    .foregroundStyle(Color.mutedGray)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 12)
+
+            VStack(alignment: .trailing, spacing: 5) {
+                Text(Money.dollars(period.displayedBalanceCents))
+                    .font(.title3.weight(.heavy))
+                    .foregroundStyle(Color.inkBlack)
+                Text("Final")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(Color.mutedGray)
+            }
+
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(Color.mutedGray)
+        }
+        .padding(16)
+        .background(Color.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(Color.softGray, lineWidth: 1)
         )
     }
+}
 
-    private var dailyBreakdown: some View {
+private struct AllowancePeriodDetailView: View {
+    var period: AllowancePeriod
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Final Balance")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(Color.brandWhite.opacity(0.8))
+                    Text(Money.dollars(period.displayedBalanceCents))
+                        .font(.system(size: 38, weight: .heavy, design: .rounded))
+                        .foregroundStyle(Color.brandWhite)
+                    Text(periodDateRange(period))
+                        .font(.subheadline)
+                        .foregroundStyle(Color.brandWhite.opacity(0.72))
+                    if period.summary.hasRolloverDebt {
+                        Label(
+                            "\(Money.dollars(period.summary.rolloverDebtCents)) carried into the next period",
+                            systemImage: "arrow.forward.circle.fill"
+                        )
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.sunYellow)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(20)
+                .background(Color.brandBlack, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                AllowanceSummaryRows(
+                    summary: period.summary,
+                    closeoutAdjustmentCents: period.closeoutAdjustmentCents
+                )
+                AllowanceDailyActivityView(period: period)
+                AllowanceLedgerView(entries: period.entries)
+            }
+            .padding(22)
+        }
+        .background(Color.paperWhite.ignoresSafeArea())
+        .navigationTitle("Period Details")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct PeriodDateRange: View {
+    var period: AllowancePeriod
+
+    var body: some View {
+        Label(periodDateRange(period), systemImage: "calendar")
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(Color.mutedGray)
+    }
+}
+
+private struct AllowanceSummaryRows: View {
+    var summary: AllowanceSummary
+    var closeoutAdjustmentCents: Int? = nil
+
+    var body: some View {
+        VStack(spacing: 0) {
+            EarningsRow(title: "Starting allowance", value: Money.dollars(summary.weeklyBaseCents), color: .inkBlack)
+            EarningsRow(title: "Deductions", value: Money.dollars(-summary.activeDeductionCents, signed: true), color: .warmOrange)
+            EarningsRow(title: "Bonuses", value: Money.dollars(summary.bonusCents, signed: true), color: .green)
+            EarningsRow(title: "Adjustments", value: Money.dollars(summary.adjustmentCents, signed: true), color: .mutedGray)
+            if let closeoutAdjustmentCents {
+                EarningsRow(
+                    title: "Closeout adjustment",
+                    value: Money.dollars(closeoutAdjustmentCents, signed: true),
+                    color: closeoutAdjustmentCents < 0 ? .warmOrange : .green
+                )
+            }
+            if summary.hasRolloverDebt {
+                EarningsRow(title: "Rollover next period", value: Money.dollars(-summary.rolloverDebtCents, signed: true), color: .warmOrange)
+            }
+        }
+        .background(Color.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.softGray, lineWidth: 1)
+        )
+    }
+}
+
+private struct AllowanceDailyActivityView: View {
+    var period: AllowancePeriod
+
+    private var rows: [AllowanceDayActivity] {
+        AllowanceEngine.dailyActivity(
+            for: period.entries,
+            from: period.startsAt,
+            to: period.endsAt
+        )
+    }
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Daily Breakdown")
+            Text("Daily Activity")
                 .font(.title3.weight(.heavy))
 
             VStack(spacing: 0) {
-                ForEach(dayRows, id: \.day) { row in
-                    HStack {
-                        Text(row.day)
-                            .font(.subheadline)
-                        Spacer()
-                        Text(row.value)
-                            .font(.subheadline.weight(.bold))
-                            .foregroundStyle(row.color)
+                ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                    HStack(alignment: .top, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(row.date.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day()))
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(Color.inkBlack)
+                            Text(dayActivityDescription(row))
+                                .font(.caption)
+                                .foregroundStyle(Color.mutedGray)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        Spacer(minLength: 12)
+
+                        Text(dayActivityAmount(row))
+                            .font(.subheadline.weight(.heavy))
+                            .foregroundStyle(dayActivityColor(row))
                     }
-                    .padding(.vertical, 10)
-                    if row.day != dayRows.last?.day {
+                    .padding(.vertical, 11)
+
+                    if index < rows.count - 1 {
                         Divider()
                     }
                 }
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(Color.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .padding(.vertical, 5)
+            .background(Color.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(Color.softGray, lineWidth: 1)
             )
         }
     }
+}
 
-    private var ledgerList: some View {
+private struct AllowanceLedgerView: View {
+    var entries: [LedgerEntry]
+
+    private var sortedEntries: [LedgerEntry] {
+        entries.sorted { $0.createdAt > $1.createdAt }
+    }
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Ledger")
-                .font(.title3.weight(.heavy))
+            HStack(alignment: .firstTextBaseline) {
+                Text("Ledger")
+                    .font(.title3.weight(.heavy))
+                Spacer()
+                Text("\(entries.count) entries")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(Color.mutedGray)
+            }
 
             VStack(spacing: 0) {
-                ForEach(store.ledger.sorted(by: { $0.createdAt > $1.createdAt })) { entry in
-                    LedgerEntryRow(entry: entry)
-                    if entry.id != store.ledger.sorted(by: { $0.createdAt > $1.createdAt }).last?.id {
-                        Divider()
+                if sortedEntries.isEmpty {
+                    Text("No ledger entries for this period.")
+                        .font(.subheadline)
+                        .foregroundStyle(Color.mutedGray)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 18)
+                } else {
+                    ForEach(Array(sortedEntries.enumerated()), id: \.element.id) { index, entry in
+                        LedgerEntryRow(entry: entry)
+                        if index < sortedEntries.count - 1 {
+                            Divider()
+                        }
                     }
                 }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
-            .background(Color.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .background(Color.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(Color.softGray, lineWidth: 1)
             )
         }
     }
+}
 
-    private var dayRows: [(day: String, value: String, color: Color)] {
-        [
-            ("Mon", "$3.00 / $3.00", .green),
-            ("Tue", "$2.50 / $3.00", .warmOrange),
-            ("Wed", "$3.00 / $3.00", .green),
-            ("Thu", "$3.00 / $3.00", .green),
-            ("Fri", "$2.00 / $3.00", .warmOrange),
-            ("Sat", "-", .mutedGray),
-            ("Sun", "-", .mutedGray)
-        ]
+private func periodDateRange(_ period: AllowancePeriod) -> String {
+    let inclusiveEnd = period.endsAt.addingTimeInterval(-1)
+    return "\(period.startsAt.formatted(.dateTime.month(.abbreviated).day())) - \(inclusiveEnd.formatted(.dateTime.month(.abbreviated).day().year()))"
+}
+
+private func periodActivitySummary(_ summary: AllowanceSummary) -> String {
+    var parts: [String] = []
+    if summary.activeDeductionCents > 0 {
+        parts.append("\(Money.dollars(summary.activeDeductionCents)) deducted")
     }
+    if summary.bonusCents > 0 {
+        parts.append("\(Money.dollars(summary.bonusCents)) bonus")
+    }
+    if summary.rolloverDebtCents > 0 {
+        parts.append("\(Money.dollars(summary.rolloverDebtCents)) rolled forward")
+    }
+    return parts.isEmpty ? "No adjustments" : parts.joined(separator: " / ")
+}
+
+private func dayActivityDescription(_ row: AllowanceDayActivity) -> String {
+    var parts: [String] = []
+    if row.startingAllowanceCents > 0 {
+        parts.append("Started \(Money.dollars(row.startingAllowanceCents))")
+    }
+    if row.deductionCents > 0 {
+        parts.append("\(Money.dollars(row.deductionCents)) deducted")
+    }
+    if row.bonusCents > 0 {
+        parts.append("\(Money.dollars(row.bonusCents)) bonus")
+    }
+    if row.adjustmentCents != 0 {
+        parts.append("\(Money.dollars(row.adjustmentCents)) adjusted")
+    }
+    if row.excusedDeductionCents > 0 {
+        parts.append("\(Money.dollars(row.excusedDeductionCents)) excused")
+    }
+    return parts.isEmpty ? "No changes" : parts.joined(separator: " / ")
+}
+
+private func dayActivityAmount(_ row: AllowanceDayActivity) -> String {
+    guard row.hasActivity else {
+        return "-"
+    }
+    return Money.dollars(row.netChangeCents, signed: row.netChangeCents != row.startingAllowanceCents)
+}
+
+private func dayActivityColor(_ row: AllowanceDayActivity) -> Color {
+    if !row.hasActivity || row.netChangeCents == 0 {
+        return .mutedGray
+    }
+    if row.netChangeCents < 0 {
+        return .warmOrange
+    }
+    if row.bonusCents > 0 || row.adjustmentCents > 0 {
+        return .green
+    }
+    return .inkBlack
 }
 
 struct AllowanceRequestCard: View {

@@ -108,6 +108,95 @@ final class AllowanceEngineTests: XCTestCase {
         XCTAssertEqual(summary.nextPeriodStartingTotalCents, 300)
     }
 
+    func testDailyActivityKeepsExcusedDeductionsVisibleWithoutChargingThem() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "UTC"))
+        let startsAt = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 9, day: 14)))
+        let endsAt = try XCTUnwrap(calendar.date(byAdding: .day, value: 3, to: startsAt))
+        let deductionDay = try XCTUnwrap(calendar.date(byAdding: .day, value: 1, to: startsAt))
+        let bonusDay = try XCTUnwrap(calendar.date(byAdding: .day, value: 2, to: startsAt))
+
+        let entries = [
+            AllowanceEngine.weeklyBaseEntry(
+                weekId: SeedData.weekId,
+                amountCents: 1_500,
+                createdAt: startsAt
+            ),
+            AllowanceEngine.deductionEntry(
+                weekId: SeedData.weekId,
+                occurrenceId: UUID(),
+                choreTitle: "Missed task",
+                amountCents: 100,
+                createdAt: deductionDay
+            ),
+            LedgerEntry(
+                weekId: SeedData.weekId,
+                type: .deduction,
+                title: "Excused task",
+                amountCents: 50,
+                isVoided: true,
+                createdAt: deductionDay
+            ),
+            AllowanceEngine.bonusEntry(
+                weekId: SeedData.weekId,
+                title: "Extra help",
+                amountCents: 200,
+                createdAt: bonusDay
+            )
+        ]
+
+        let rows = AllowanceEngine.dailyActivity(
+            for: entries,
+            from: startsAt,
+            to: endsAt,
+            calendar: calendar
+        )
+
+        XCTAssertEqual(rows.count, 3)
+        XCTAssertEqual(rows[0].startingAllowanceCents, 1_500)
+        XCTAssertEqual(rows[0].netChangeCents, 1_500)
+        XCTAssertEqual(rows[1].deductionCents, 100)
+        XCTAssertEqual(rows[1].excusedDeductionCents, 50)
+        XCTAssertEqual(rows[1].netChangeCents, -100)
+        XCTAssertEqual(rows[2].bonusCents, 200)
+        XCTAssertEqual(rows[2].netChangeCents, 200)
+    }
+
+    func testArchivedPeriodPrefersServerFinalBalance() {
+        let entries = [
+            AllowanceEngine.weeklyBaseEntry(weekId: SeedData.weekId, amountCents: 1_500),
+            AllowanceEngine.deductionEntry(
+                weekId: SeedData.weekId,
+                occurrenceId: UUID(),
+                choreTitle: "Missed task",
+                amountCents: 100
+            )
+        ]
+        let period = AllowancePeriod(
+            id: SeedData.weekId,
+            familyId: SeedData.familyId,
+            childId: SeedData.childId,
+            startsAt: Date().addingTimeInterval(-7 * 24 * 60 * 60),
+            endsAt: Date(),
+            baseAllowanceCents: 1_500,
+            archivedAt: Date(),
+            finalBalanceCents: 1_350,
+            entries: entries
+        )
+
+        XCTAssertTrue(period.isArchived)
+        XCTAssertEqual(period.summary.currentTotalCents, 1_400)
+        XCTAssertEqual(period.displayedBalanceCents, 1_350)
+        XCTAssertEqual(period.closeoutAdjustmentCents, -50)
+    }
+
+    func testSeedStateIncludesArchivedAllowanceHistory() {
+        let snapshot = SeedData.snapshot()
+
+        XCTAssertEqual(snapshot.allowancePeriods.filter(\.isArchived).count, 1)
+        XCTAssertEqual(snapshot.allowancePeriods.first { $0.id == snapshot.weekId }?.entries, snapshot.ledger)
+    }
+
     func testEveryTwoWeekAllowanceUsesAnchorDate() throws {
         let calendar = Calendar(identifier: .gregorian)
         let anchor = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 7, day: 3)))

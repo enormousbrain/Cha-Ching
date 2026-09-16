@@ -385,6 +385,81 @@ public struct LedgerEntry: Identifiable, Codable, Equatable, Sendable {
     }
 }
 
+public struct AllowancePeriod: Identifiable, Codable, Equatable, Sendable {
+    public var id: UUID
+    public var familyId: UUID
+    public var childId: UUID
+    public var startsAt: Date
+    public var endsAt: Date
+    public var baseAllowanceCents: Int
+    public var archivedAt: Date?
+    public var finalBalanceCents: Int?
+    public var entries: [LedgerEntry]
+
+    public init(
+        id: UUID = UUID(),
+        familyId: UUID,
+        childId: UUID,
+        startsAt: Date,
+        endsAt: Date,
+        baseAllowanceCents: Int,
+        archivedAt: Date? = nil,
+        finalBalanceCents: Int? = nil,
+        entries: [LedgerEntry] = []
+    ) {
+        self.id = id
+        self.familyId = familyId
+        self.childId = childId
+        self.startsAt = startsAt
+        self.endsAt = endsAt
+        self.baseAllowanceCents = baseAllowanceCents
+        self.archivedAt = archivedAt
+        self.finalBalanceCents = finalBalanceCents
+        self.entries = entries
+    }
+
+    public var isArchived: Bool {
+        archivedAt != nil
+    }
+
+    public var summary: AllowanceSummary {
+        AllowanceEngine.summary(for: entries)
+    }
+
+    public var displayedBalanceCents: Int {
+        finalBalanceCents ?? summary.currentTotalCents
+    }
+
+    public var closeoutAdjustmentCents: Int? {
+        guard let finalBalanceCents else {
+            return nil
+        }
+
+        let adjustment = finalBalanceCents - summary.currentTotalCents
+        return adjustment == 0 ? nil : adjustment
+    }
+}
+
+public struct AllowanceDayActivity: Identifiable, Equatable, Sendable {
+    public var date: Date
+    public var startingAllowanceCents: Int
+    public var deductionCents: Int
+    public var bonusCents: Int
+    public var adjustmentCents: Int
+    public var excusedDeductionCents: Int
+    public var entryCount: Int
+
+    public var id: Date { date }
+
+    public var netChangeCents: Int {
+        startingAllowanceCents - deductionCents + bonusCents + adjustmentCents
+    }
+
+    public var hasActivity: Bool {
+        entryCount > 0
+    }
+}
+
 public enum TaskOccurrenceStatus: String, Codable, CaseIterable, Identifiable, Sendable {
     case upcoming
     case due
@@ -818,4 +893,5 @@ public struct SeedSnapshot: Sendable {
     public var occurrences: [TaskOccurrence]
     public var submissions: [ChoreSubmission]
     public var ledger: [LedgerEntry]
+    public var allowancePeriods: [AllowancePeriod]
 }

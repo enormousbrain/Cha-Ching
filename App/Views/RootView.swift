@@ -54,8 +54,23 @@ struct ChildShellView: View {
 }
 
 struct ParentShellView: View {
+    private enum ParentTab: String {
+        case review
+        case chores
+        case family
+        case earnings
+        case widgets
+    }
+
+    @State private var selectedTab: ParentTab
+
+    init() {
+        let launchTab = ProcessInfo.processInfo.environment["CHACHING_START_TAB"]
+        _selectedTab = State(initialValue: ParentTab(rawValue: launchTab ?? "") ?? .review)
+    }
+
     var body: some View {
-        TabView {
+        TabView(selection: $selectedTab) {
             NavigationStack {
                 ParentReviewQueueView()
                     .navigationTitle("Review")
@@ -65,6 +80,7 @@ struct ParentShellView: View {
             .tabItem {
                 Label("Review", systemImage: "checklist.checked")
             }
+            .tag(ParentTab.review)
 
             NavigationStack {
                 ChoreManagementView()
@@ -75,6 +91,7 @@ struct ParentShellView: View {
             .tabItem {
                 Label("Chores", systemImage: "list.bullet.rectangle.fill")
             }
+            .tag(ParentTab.chores)
 
             NavigationStack {
                 FamilyManagementView()
@@ -85,6 +102,7 @@ struct ParentShellView: View {
             .tabItem {
                 Label("Family", systemImage: "person.2.fill")
             }
+            .tag(ParentTab.family)
 
             NavigationStack {
                 EarningsView(allowsBonusActions: true)
@@ -93,6 +111,7 @@ struct ParentShellView: View {
             .tabItem {
                 Label("Earnings", systemImage: "chart.bar.fill")
             }
+            .tag(ParentTab.earnings)
 
             NavigationStack {
                 WidgetPreviewView()
@@ -101,6 +120,7 @@ struct ParentShellView: View {
             .tabItem {
                 Label("Widgets", systemImage: "rectangle.grid.2x2.fill")
             }
+            .tag(ParentTab.widgets)
         }
     }
 }

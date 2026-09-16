@@ -58,6 +58,56 @@ public enum AllowanceEngine {
         )
     }
 
+    public static func dailyActivity(
+        for entries: [LedgerEntry],
+        from startsAt: Date,
+        to endsAt: Date,
+        calendar: Calendar = .current
+    ) -> [AllowanceDayActivity] {
+        guard startsAt < endsAt else {
+            return []
+        }
+
+        let entriesByDay = Dictionary(grouping: entries) {
+            calendar.startOfDay(for: $0.createdAt)
+        }
+        var day = calendar.startOfDay(for: startsAt)
+        var rows: [AllowanceDayActivity] = []
+
+        while day < endsAt {
+            let dayEntries = entriesByDay[day] ?? []
+            let activeEntries = dayEntries.filter { !$0.isVoided }
+            rows.append(
+                AllowanceDayActivity(
+                    date: day,
+                    startingAllowanceCents: activeEntries
+                        .filter { $0.type == .weeklyBase }
+                        .reduce(0) { $0 + $1.amountCents },
+                    deductionCents: activeEntries
+                        .filter { $0.type == .deduction }
+                        .reduce(0) { $0 + $1.amountCents },
+                    bonusCents: activeEntries
+                        .filter { $0.type == .bonus }
+                        .reduce(0) { $0 + $1.amountCents },
+                    adjustmentCents: activeEntries
+                        .filter { $0.type == .adjustment }
+                        .reduce(0) { $0 + $1.amountCents },
+                    excusedDeductionCents: dayEntries
+                        .filter { $0.isVoided && $0.type == .deduction }
+                        .reduce(0) { $0 + $1.amountCents },
+                    entryCount: dayEntries.count
+                )
+            )
+
+            guard let nextDay = calendar.date(byAdding: .day, value: 1, to: day) else {
+                break
+            }
+            day = nextDay
+        }
+
+        return rows
+    }
+
     public static func deductionExists(in entries: [LedgerEntry], for occurrenceId: UUID) -> Bool {
         entries.contains {
             !$0.isVoided &&

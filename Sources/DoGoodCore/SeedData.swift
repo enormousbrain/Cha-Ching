@@ -65,6 +65,64 @@ public enum SeedData {
             )
         ]
 
+        let settings = allowanceSettings(now: now)
+        let currentPeriodEnd = settings.nextScheduledAllowanceDate(after: now)
+        let currentPeriodStart = Calendar.current.date(
+            byAdding: .day,
+            value: -settings.cadence.intervalDays,
+            to: currentPeriodEnd
+        ) ?? now.addingTimeInterval(-7 * 24 * 60 * 60)
+        let archivedPeriodEnd = currentPeriodStart
+        let archivedPeriodStart = Calendar.current.date(
+            byAdding: .day,
+            value: -settings.cadence.intervalDays,
+            to: archivedPeriodEnd
+        ) ?? currentPeriodStart.addingTimeInterval(-7 * 24 * 60 * 60)
+        let archivedWeekId = UUID(uuidString: "E923C3B2-A00B-4DE0-AC31-34AB30BA7E56")!
+        let archivedLedger = [
+            AllowanceEngine.weeklyBaseEntry(
+                weekId: archivedWeekId,
+                amountCents: weeklyAllowanceCents,
+                createdAt: archivedPeriodStart
+            ),
+            AllowanceEngine.deductionEntry(
+                weekId: archivedWeekId,
+                occurrenceId: UUID(uuidString: "7AC8BC81-B9D2-4D35-B2ED-733E7CD1E9BD")!,
+                choreTitle: "Feed dog (Evening)",
+                amountCents: 100,
+                createdAt: archivedPeriodStart.addingTimeInterval(2 * 24 * 60 * 60)
+            ),
+            AllowanceEngine.bonusEntry(
+                weekId: archivedWeekId,
+                title: "Helped with groceries",
+                amountCents: 200,
+                note: "Above and beyond",
+                createdAt: archivedPeriodStart.addingTimeInterval(4 * 24 * 60 * 60)
+            )
+        ]
+        let allowancePeriods = [
+            AllowancePeriod(
+                id: weekId,
+                familyId: familyId,
+                childId: childId,
+                startsAt: currentPeriodStart,
+                endsAt: currentPeriodEnd,
+                baseAllowanceCents: weeklyAllowanceCents,
+                entries: ledger
+            ),
+            AllowancePeriod(
+                id: archivedWeekId,
+                familyId: familyId,
+                childId: childId,
+                startsAt: archivedPeriodStart,
+                endsAt: archivedPeriodEnd,
+                baseAllowanceCents: weeklyAllowanceCents,
+                archivedAt: archivedPeriodEnd,
+                finalBalanceCents: 1_600,
+                entries: archivedLedger
+            )
+        ]
+
         return SeedSnapshot(
             familyId: familyId,
             parentId: parentId,
@@ -74,7 +132,7 @@ public enum SeedData {
             childName: childName,
             parentName: parentName,
             weeklyAllowanceCents: weeklyAllowanceCents,
-            allowanceSettings: allowanceSettings(now: now),
+            allowanceSettings: settings,
             members: members(now: now),
             childProfiles: childProfiles(now: now),
             childInvites: [],
@@ -83,21 +141,24 @@ public enum SeedData {
             chores: chores,
             occurrences: occurrences,
             submissions: submissions,
-            ledger: ledger
+            ledger: ledger,
+            allowancePeriods: allowancePeriods
         )
     }
 
     public static func snapshotWithBonus(now: Date = Date()) -> SeedSnapshot {
         var snapshot = snapshot(now: now)
-        snapshot.ledger.append(
-            AllowanceEngine.bonusEntry(
-                weekId: weekId,
-                title: "Helped without being asked",
-                amountCents: 200,
-                note: "Above and beyond",
-                createdAt: now
-            )
+        let bonus = AllowanceEngine.bonusEntry(
+            weekId: weekId,
+            title: "Helped without being asked",
+            amountCents: 200,
+            note: "Above and beyond",
+            createdAt: now
         )
+        snapshot.ledger.append(bonus)
+        if let index = snapshot.allowancePeriods.firstIndex(where: { $0.id == weekId }) {
+            snapshot.allowancePeriods[index].entries.append(bonus)
+        }
         return snapshot
     }
 

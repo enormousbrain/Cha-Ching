@@ -135,11 +135,11 @@ struct SupabaseRemoteStore: Sendable {
             .value
     }
 
-    func fetchLedger(weekId: UUID) async throws -> [LedgerEntryRecord] {
+    func fetchLedger(childId: UUID) async throws -> [LedgerEntryRecord] {
         try await client
             .from("ledger_entries")
             .select()
-            .eq("week_id", value: weekId.uuidString)
+            .eq("child_id", value: childId.uuidString)
             .order("created_at", ascending: false)
             .execute()
             .value

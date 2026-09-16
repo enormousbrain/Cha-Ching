@@ -47,7 +47,7 @@ Current display name: `ChaChing`
 - Supabase write-back for parent-created bonuses, chore title/deduction/time edits, and allowance amount/schedule changes
 - Parent review queue actions
 - Parent chore editing
-- Earnings/ledger overview
+- Supabase-backed current earnings, daily ledger activity, and archived allowance-period browsing
 - Static lock-screen and home-screen widget previews
 - Addable WidgetKit extension with Home Screen and Lock Screen allowance widgets backed by shared App Group state
 - Parent allowance controls for the next period's amount and weekly or every-two-week cadence
@@ -299,7 +299,6 @@ psql "postgresql://postgres:${SUPABASE_DB_PASSWORD}@db.pjvgtmxyxrfhabyuefne.supa
 
 1. Accept Zoe's child invite, then smoke-test photo upload, on-device people blocking, AI review, and parent evidence viewing across two physical devices.
 2. Add APNs-backed instant sync and parent-to-child nudges.
-3. Replace the earnings screen's sample daily breakdown with real ledger history and add archived-period browsing.
-4. Remove remaining production local-only mutation fallbacks so remote write failures are always explicit and retryable.
-5. Add a dedicated child allowance-day celebration and parent closeout review before the payment request handoff.
-6. Add orphaned-upload cleanup as a backstop for uploads interrupted before submission registration.
+3. Remove remaining production local-only mutation fallbacks so remote write failures are always explicit and retryable.
+4. Add a dedicated child allowance-day celebration and parent closeout review before the payment request handoff.
+5. Add orphaned-upload cleanup as a backstop for uploads interrupted before submission registration.

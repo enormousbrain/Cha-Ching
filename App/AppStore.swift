@@ -26,6 +26,7 @@ final class AppStore: ObservableObject {
     @Published var occurrences: [TaskOccurrence]
     @Published var submissions: [ChoreSubmission]
     @Published var ledger: [LedgerEntry]
+    @Published var allowancePeriods: [AllowancePeriod]
     @Published var allowanceSettings: AllowanceSettings
     @Published var evidencePolicy: FamilyEvidencePolicy
     @Published var notificationState: NotificationState
@@ -74,6 +75,7 @@ final class AppStore: ObservableObject {
         self.occurrences = snapshot.occurrences
         self.submissions = snapshot.submissions
         self.ledger = snapshot.ledger
+        self.allowancePeriods = snapshot.allowancePeriods
         self.evidencePolicy = snapshot.evidencePolicy
         if let savedSettings = Self.loadAllowanceSettings(from: settingsStore, key: allowanceSettingsKey),
            savedSettings.familyId == snapshot.familyId {
@@ -112,6 +114,20 @@ final class AppStore: ObservableObject {
 
     var allowanceSummary: AllowanceSummary {
         AllowanceEngine.summary(for: ledger)
+    }
+
+    var activeAllowancePeriod: AllowancePeriod? {
+        guard var period = allowancePeriods.first(where: { $0.id == weekId }) else {
+            return nil
+        }
+        period.entries = ledger
+        return period
+    }
+
+    var archivedAllowancePeriods: [AllowancePeriod] {
+        allowancePeriods
+            .filter(\.isArchived)
+            .sorted { $0.startsAt > $1.startsAt }
     }
 
     var allowancePeriodTitle: String {
@@ -1389,6 +1405,7 @@ final class AppStore: ObservableObject {
         occurrences = snapshot.occurrences
         submissions = snapshot.submissions
         ledger = snapshot.ledger
+        allowancePeriods = snapshot.allowancePeriods
         evidencePolicy = snapshot.evidencePolicy
 
         if let savedSettings = Self.loadAllowanceSettings(from: settingsStore, key: allowanceSettingsKey),
@@ -1430,14 +1447,16 @@ final class AppStore: ObservableObject {
             childId: selectedChildProfile.id
         )
 
-        guard let weekRecord = weekRecords.first else {
+        guard let weekRecord = weekRecords.first(where: { $0.archivedAt == nil }) ?? weekRecords.first else {
             throw FamilySyncError.missingCurrentWeek
         }
 
         let choreRecords = try await remoteStore.fetchChores(familyId: membership.familyId)
         let occurrenceRecords = try await remoteStore.fetchOccurrences(weekId: weekRecord.id)
         let submissionRecords = try await remoteStore.fetchChoreSubmissions(childId: selectedChildProfile.id)
-        let ledgerRecords = try await remoteStore.fetchLedger(weekId: weekRecord.id)
+        let ledgerRecords = try await remoteStore.fetchLedger(childId: selectedChildProfile.id)
+        let localLedgerEntries = ledgerRecords.map { localLedgerEntry(from: $0) }
+        let entriesByWeek = Dictionary(grouping: localLedgerEntries, by: \.weekId)
 
         let remoteOccurrences = occurrenceRecords.map { localOccurrence(from: $0) }
         let occurrenceIds = Set(remoteOccurrences.map(\.id))
@@ -1465,7 +1484,10 @@ final class AppStore: ObservableObject {
             .map { localChoreDefinition(from: $0) }
         occurrences = remoteOccurrences
         submissions = remoteSubmissions
-        ledger = ledgerRecords.map { localLedgerEntry(from: $0) }
+        ledger = entriesByWeek[weekRecord.id] ?? []
+        allowancePeriods = weekRecords.map {
+            localAllowancePeriod(from: $0, entries: entriesByWeek[$0.id] ?? [])
+        }
         evidencePolicy = evidencePolicyRecord.map { localEvidencePolicy(from: $0) }
             ?? FamilyEvidencePolicy(familyId: familyRecord.id)
 
@@ -1641,6 +1663,23 @@ final class AppStore: ObservableObject {
             note: record.note,
             isVoided: record.isVoided,
             createdAt: record.createdAt
+        )
+    }
+
+    private func localAllowancePeriod(
+        from record: WeekRecord,
+        entries: [LedgerEntry]
+    ) -> AllowancePeriod {
+        AllowancePeriod(
+            id: record.id,
+            familyId: record.familyId,
+            childId: record.childId,
+            startsAt: record.startsAt,
+            endsAt: record.endsAt,
+            baseAllowanceCents: record.baseAllowanceCents,
+            archivedAt: record.archivedAt,
+            finalBalanceCents: record.finalBalanceCents,
+            entries: entries
         )
     }
 
