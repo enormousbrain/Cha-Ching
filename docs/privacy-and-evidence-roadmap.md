@@ -115,9 +115,15 @@ Done:
 - Family/chore evidence settings UI and schema.
 - Child no-photo submission flow for chores that allow it.
 - Evidence deletion scheduling in parent review actions, including chore overrides and the undo grace window.
+- Parent-authorized evidence deletion plus a secret-protected cleanup worker that removes due Storage objects, preserves audit metadata, and clears expired invite token hashes.
+- A Supabase cron schedule that invokes retention cleanup every 15 minutes.
+- Transactional photo registration that verifies the authenticated linked child and records the submission before AI review begins.
+- Production-safe AI failure behavior: submitted photos remain pending for a parent and never fall back to convincing mock results.
+- Authenticated parent evidence thumbnails and full-screen private photo viewing.
+- Verdict-aware AI presentation that does not equate confidence with task completion or parent approval.
 
 Next:
 
 1. Physical-device smoke test for on-device person/face blocking before upload.
-2. Evidence deletion worker and nightly retention cleanup backstop.
-3. Realtime or push-triggered refresh for faster cross-device updates.
+2. Realtime or push-triggered refresh for faster cross-device updates.
+3. Scheduled cleanup for orphaned Storage uploads that never reached transactional registration.

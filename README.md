@@ -35,8 +35,10 @@ Current display name: `ChaChing`
 - Supabase schema and Edge Function source for `parent_invites`
 - Child dashboard
 - Task detail
-- Native camera JPEG evidence capture with a simulator-friendly mock fallback
-- Supabase Storage evidence upload and `review-evidence` AI review call with local fallback while auth is unfinished
+- Native camera JPEG evidence capture with a debug-only simulator mock
+- Transactional Supabase evidence registration plus advisory `review-evidence` AI review; production upload failures never become mock successes
+- Authenticated parent evidence thumbnails and full-screen private photo review
+- Verdict-aware AI copy that keeps completion, confidence, and parent approval as separate concepts
 - Parent Family Sync card for email or phone OTP sign-in, remote family bootstrap, Supabase-backed family loading, and sign-out
 - Supabase-backed role routing from `family_members.role`
 - Supabase parent review decision RPC and app wiring for approve, reject, excuse, and retake actions
@@ -59,7 +61,7 @@ Current display name: `ChaChing`
 
 ## Privacy and Evidence Direction
 
-The current app can capture and upload chore evidence photos, but the planned product direction is privacy-first and parent-configurable:
+Chore evidence is privacy-first and parent-configurable:
 
 - Photo evidence can be disabled for a family and configured per chore.
 - Chores can be `photo_required`, `photo_optional`, `parent_only`, or `no_verification`.
@@ -90,10 +92,10 @@ The main app also registers an iOS `BGAppRefreshTask` for `com.artofsullivan.cha
 ```sh
 swift test
 xcodebuild -project ChaChing.xcodeproj -scheme ChaChing \
-  -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.5' build
+  -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' build
 ```
 
-The app has also been installed and launched in the iPhone 16 simulator.
+The current core suite contains 16 passing tests, and the app plus widget extension compile for the iOS Simulator.
 
 ## Supabase
 
@@ -107,7 +109,7 @@ The checked-in key is the Supabase publishable key, which is expected to be pres
 
 ### Auth
 
-Family Sync supports email OTP and phone OTP. Phone OTP requires a configured Supabase SMS provider before it can send codes; without one, Supabase returns an unsupported phone provider error. Email OTP is the easiest TestFlight path for now.
+Family Sync supports email OTP and phone OTP. The production Supabase project uses Twilio Verify for phone OTP. For a new Supabase environment, configure a Twilio Verify service under Authentication > Sign In / Providers > Phone before testing SMS codes.
 
 For email OTP, update Supabase Auth templates so the email shows the one-time code. Add `{{ .Token }}` to both the Confirm Signup and Magic Link templates. Keep `{{ .ConfirmationURL }}` as a backup link if desired, but set the Auth Site URL away from localhost, for example `https://enormousbrain.com/cha-ching/`, and add any app/web callback URLs to the allowed redirect URLs list.
 
@@ -141,6 +143,7 @@ Current app secrets:
 OPENAI_API_KEY
 OPENAI_REVIEW_MODEL
 OPENAI_REVIEW_IMAGE_DETAIL
+OPENAI_REVIEW_PROMPT_VERSION
 ```
 
 Supabase-hosted Edge Functions are expected to provide `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` to the invite/review functions. Do not put those values in the iOS app.
@@ -159,6 +162,9 @@ supabase/migrations/0008_task_nudges.sql
 supabase/migrations/0009_chore_recurrence.sql
 supabase/migrations/0010_task_deadlines.sql
 supabase/migrations/0011_chore_lifecycle.sql
+supabase/migrations/0012_evidence_deletion_schedule.sql
+supabase/migrations/0013_retention_cleanup.sql
+supabase/migrations/0014_submission_registration.sql
 ```
 
 `0004_family_bootstrap.sql` adds the `bootstrap_preview_family` RPC used by the parent Family Sync card. A signed-in parent can create the initial remote family, child profile, current week, starting allowance ledger entry, and preview chore schedule from the app.
@@ -179,10 +185,14 @@ supabase/migrations/0011_chore_lifecycle.sql
 
 `0012_evidence_deletion_schedule.sql` adds evidence lifecycle metadata and updates parent review decisions to schedule photo deletion using the effective family/chore retention policy and undo grace window.
 
+`0013_retention_cleanup.sql` allows expired invite token hashes to be cleared after the invite is no longer usable.
+
+`0014_submission_registration.sql` adds an authenticated, transactional photo-submission RPC and hardens no-photo submissions so only the linked child account with a child family role can submit assigned chores.
+
 Evidence files should be stored under paths beginning with the family id:
 
 ```text
-{familyId}/{taskOccurrenceId}/original.jpg
+{familyId}/{taskOccurrenceId}/{submissionId}.jpg
 ```
 
 Invite acceptance is handled by:
@@ -202,13 +212,20 @@ supabase/migrations/0003_parent_invites.sql
 
 The parent function also expects an authenticated Supabase user and raw invite token. It hashes the token, matches `parent_invites.token_hash`, upserts a `family_members` row with `role = 'parent'`, and marks the invite accepted.
 
+Deploy both invite endpoints with JWT verification enabled:
+
+```sh
+supabase functions deploy accept-child-invite --project-ref "$SUPABASE_PROJECT_REF"
+supabase functions deploy accept-parent-invite --project-ref "$SUPABASE_PROJECT_REF"
+```
+
 AI evidence review is handled by:
 
 ```text
 supabase/functions/review-evidence/index.ts
 ```
 
-The function expects an authenticated family member and a `submission_id`. It loads the submission, occurrence, chore definition, and private evidence image server-side, asks OpenAI for structured JSON, stores the advisory result in `chore_submissions.ai_result`, and moves the occurrence to `ai_reviewed` unless a parent has already made a final decision.
+The function expects an authenticated family member and a `submission_id`. It verifies child requests against the linked child profile, loads the private evidence image server-side, asks OpenAI for structured JSON, and stores the advisory result in `chore_submissions.ai_result`. If the model is unavailable, the photo remains submitted and receives an explicit parent-review result instead of a fabricated success. A parent decision is never overwritten by a late AI response.
 
 Deploy it with:
 
@@ -221,6 +238,23 @@ Invoke it from the app with:
 ```json
 { "submission_id": "..." }
 ```
+
+Due evidence deletion and expired-invite cleanup are handled by:
+
+```text
+supabase/functions/delete-submission-evidence/index.ts
+supabase/functions/retention-cleanup/index.ts
+```
+
+`delete-submission-evidence` is a parent-authorized, idempotent endpoint for one due submission. `retention-cleanup` is a secret-protected batch worker that removes due Storage objects, clears both image paths, preserves the submission audit row, and expires old invite token hashes.
+
+Deploy both functions, apply `0013_retention_cleanup.sql`, store a generated cleanup secret in Supabase Vault, and install the 15-minute cron schedule with:
+
+```sh
+./scripts/configure-evidence-cleanup.sh
+```
+
+The script reads `SUPABASE_DB_PASSWORD` when set, otherwise it uses the existing `ChaChing Supabase DB Password` Keychain item. The cleanup function is deployed with gateway JWT verification disabled because it authenticates scheduled requests using the separate `x-cleanup-secret` value.
 
 To apply migrations without saving the database password:
 
@@ -250,17 +284,18 @@ psql "postgresql://postgres:${SUPABASE_DB_PASSWORD}@db.pjvgtmxyxrfhabyuefne.supa
   -f supabase/migrations/0011_chore_lifecycle.sql
 psql "postgresql://postgres:${SUPABASE_DB_PASSWORD}@db.pjvgtmxyxrfhabyuefne.supabase.co:5432/postgres" \
   -f supabase/migrations/0012_evidence_deletion_schedule.sql
+psql "postgresql://postgres:${SUPABASE_DB_PASSWORD}@db.pjvgtmxyxrfhabyuefne.supabase.co:5432/postgres" \
+  -f supabase/migrations/0013_retention_cleanup.sql
+psql "postgresql://postgres:${SUPABASE_DB_PASSWORD}@db.pjvgtmxyxrfhabyuefne.supabase.co:5432/postgres" \
+  -f supabase/migrations/0014_submission_registration.sql
 ```
 
 ## Next Slices
 
-1. Upload build 11 and smoke-test pause, resume, archive, dark mode, and automatically missed chores across parent and child TestFlight devices.
-2. Smoke-test auth-backed evidence upload, on-device people blocking, and AI review on a physical phone against the remote family.
-3. Add APNs-backed instant sync and parent-to-child nudges.
-4. Add the evidence deletion worker and allowance-period cleanup backstop.
-5. Add nightly retention cleanup for stale evidence and expired invite tokens.
-6. Add realtime or push-triggered refresh so both parent phones and child phones converge without manually tapping Refresh.
-7. Persist notification preferences and rollover closeout state in Supabase once remote writes are live.
-8. Add a dedicated child allowance-day celebration screen surfaced from push/local notification and dashboard state.
-9. Add parent-facing allowance-period closeout review before a child message request is sent.
-10. Add Universal Links.
+1. Accept Zoe's child invite, then smoke-test photo upload, on-device people blocking, AI review, and parent evidence viewing across two physical devices.
+2. Add APNs-backed instant sync and parent-to-child nudges.
+3. Make allowance-period boundaries and rollover closeout fully server-authoritative.
+4. Replace the earnings screen's sample daily breakdown with real ledger history and add archived-period browsing.
+5. Remove remaining production local-only mutation fallbacks so remote write failures are always explicit and retryable.
+6. Add a dedicated child allowance-day celebration and parent closeout review before the payment request handoff.
+7. Add orphaned-upload cleanup as a backstop for uploads interrupted before submission registration.

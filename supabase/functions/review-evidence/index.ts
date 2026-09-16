@@ -54,6 +54,12 @@ type FamilyMembership = {
   role: "parent" | "child";
 };
 
+type ChildProfile = {
+  id: string;
+  family_id: string;
+  linked_user_id: string | null;
+};
+
 type ModelReviewResult = {
   completed: boolean | null;
   confidence: number;
@@ -65,9 +71,11 @@ type ModelReviewResult = {
 
 type StoredReviewResult = ModelReviewResult & {
   modelName: string;
+  reviewVersion: string;
   reviewedAt: string;
 };
 
+// deno-lint-ignore no-explicit-any
 type SupabaseClientLike = SupabaseClient<any, "public", "public", any, any>;
 
 const reviewSchema = {
@@ -152,6 +160,8 @@ async function handleRequest(request: Request): Promise<Response> {
   const openAIKey = getEnv("OPENAI_API_KEY");
 
   const modelName = Deno.env.get("OPENAI_REVIEW_MODEL")?.trim() || "gpt-5.6";
+  const reviewVersion = Deno.env.get("OPENAI_REVIEW_PROMPT_VERSION")?.trim() ||
+    "2026-07-18.1";
   const imageDetail = parseImageDetail(
     Deno.env.get("OPENAI_REVIEW_IMAGE_DETAIL"),
   );
@@ -205,13 +215,20 @@ async function handleRequest(request: Request): Promise<Response> {
     return json({ error: "not_family_member" }, 403);
   }
 
-  if (
-    membership.role !== "parent" && submission.child_id !== userData.user.id
-  ) {
-    return json({ error: "not_submission_owner" }, 403);
+  if (membership.role === "child") {
+    const childProfile = await loadChildProfile(
+      serviceClient,
+      submission.child_id,
+    );
+    if (
+      !childProfile || childProfile.family_id !== familyId ||
+      childProfile.linked_user_id !== userData.user.id
+    ) {
+      return json({ error: "not_submission_owner" }, 403);
+    }
   }
 
-  if (!submission.image_path.startsWith(`${familyId}/`)) {
+  if (!submission.image_path.toLowerCase().startsWith(`${familyId}/`)) {
     return json({ error: "image_path_family_mismatch" }, 409);
   }
 
@@ -230,17 +247,38 @@ async function handleRequest(request: Request): Promise<Response> {
   }
 
   const base64Image = base64FromArrayBuffer(await imageBlob.arrayBuffer());
-  const aiResult = await reviewEvidenceWithOpenAI({
-    apiKey: openAIKey,
-    modelName,
-    imageDetail,
-    mimeType,
-    base64Image,
-    submission,
-    occurrence,
-    chore,
-    userId: userData.user.id,
-  });
+
+  if (["upcoming", "due"].includes(occurrence.status)) {
+    const { error: submittedStatusError } = await serviceClient
+      .from("task_occurrences")
+      .update({ status: "submitted", submission_id: submission.id })
+      .eq("id", occurrence.id)
+      .in("status", ["upcoming", "due"]);
+
+    if (submittedStatusError) {
+      console.error(submittedStatusError);
+      return json({ error: "submission_status_update_failed" }, 500);
+    }
+  }
+
+  let aiResult: StoredReviewResult;
+  try {
+    aiResult = await reviewEvidenceWithOpenAI({
+      apiKey: openAIKey,
+      modelName,
+      reviewVersion,
+      imageDetail,
+      mimeType,
+      base64Image,
+      submission,
+      occurrence,
+      chore,
+      userId: userData.user.id,
+    });
+  } catch (error) {
+    console.error(error);
+    aiResult = unavailableReviewResult(modelName, reviewVersion);
+  }
 
   const { error: submissionUpdateError } = await serviceClient
     .from("chore_submissions")
@@ -252,19 +290,18 @@ async function handleRequest(request: Request): Promise<Response> {
     return json({ error: "submission_update_failed" }, 500);
   }
 
-  if (!["approved", "rejected", "excused"].includes(occurrence.status)) {
-    const { error: occurrenceUpdateError } = await serviceClient
-      .from("task_occurrences")
-      .update({
-        status: "ai_reviewed",
-        submission_id: submission.id,
-      })
-      .eq("id", occurrence.id);
+  const { error: occurrenceUpdateError } = await serviceClient
+    .from("task_occurrences")
+    .update({
+      status: "ai_reviewed",
+      submission_id: submission.id,
+    })
+    .eq("id", occurrence.id)
+    .in("status", ["upcoming", "due", "submitted", "ai_reviewed"]);
 
-    if (occurrenceUpdateError) {
-      console.error(occurrenceUpdateError);
-      return json({ error: "occurrence_update_failed" }, 500);
-    }
+  if (occurrenceUpdateError) {
+    console.error(occurrenceUpdateError);
+    return json({ error: "occurrence_update_failed" }, 500);
   }
 
   return json({
@@ -370,9 +407,28 @@ async function loadMembership(
   return data as FamilyMembership | null;
 }
 
+async function loadChildProfile(
+  client: SupabaseClientLike,
+  id: string,
+): Promise<ChildProfile | null> {
+  const { data, error } = await client
+    .from("child_profiles")
+    .select("id,family_id,linked_user_id")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (error) {
+    console.error(error);
+    throw new Error("child_profile_lookup_failed");
+  }
+
+  return data as ChildProfile | null;
+}
+
 async function reviewEvidenceWithOpenAI(input: {
   apiKey: string;
   modelName: string;
+  reviewVersion: string;
   imageDetail: "low" | "high" | "original" | "auto";
   mimeType: string;
   base64Image: string;
@@ -429,6 +485,7 @@ async function reviewEvidenceWithOpenAI(input: {
         },
       },
     }),
+    signal: AbortSignal.timeout(45_000),
   });
 
   const responseBody = await response.json().catch(() => null);
@@ -448,6 +505,7 @@ async function reviewEvidenceWithOpenAI(input: {
       retakeInstruction: null,
       parentReviewPriority: "high",
       modelName: input.modelName,
+      reviewVersion: input.reviewVersion,
       reviewedAt: new Date().toISOString(),
     };
   }
@@ -463,6 +521,25 @@ async function reviewEvidenceWithOpenAI(input: {
   return {
     ...validated,
     modelName: input.modelName,
+    reviewVersion: input.reviewVersion,
+    reviewedAt: new Date().toISOString(),
+  };
+}
+
+function unavailableReviewResult(
+  modelName: string,
+  reviewVersion: string,
+): StoredReviewResult {
+  return {
+    completed: null,
+    confidence: 0,
+    reason:
+      "The AI check is unavailable right now. The photo was saved for a parent to review directly.",
+    retakeSuggested: false,
+    retakeInstruction: null,
+    parentReviewPriority: "high",
+    modelName,
+    reviewVersion,
     reviewedAt: new Date().toISOString(),
   };
 }

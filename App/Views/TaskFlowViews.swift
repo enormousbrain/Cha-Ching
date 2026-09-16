@@ -224,7 +224,10 @@ struct CameraCaptureView: View {
     }
 
     var body: some View {
-        if let occurrence, occurrence.status == .aiReviewed {
+        if let occurrence,
+           occurrence.submissionId != nil,
+           occurrence.status == .submitted || occurrence.status == .aiReviewed
+        {
             AIReviewResultView(occurrenceId: occurrenceId)
         } else {
             cameraSurface
@@ -400,7 +403,8 @@ struct CameraCaptureView: View {
         }
 
         guard let image else {
-            await store.submitEvidence(for: occurrenceId)
+            let outcome = await store.submitEvidence(for: occurrenceId)
+            handleSubmissionOutcome(outcome)
             return
         }
 
@@ -429,7 +433,17 @@ struct CameraCaptureView: View {
             isCheckingPhotoPrivacy = false
         }
 
-        await store.submitEvidence(for: occurrenceId, jpegData: jpegData)
+        let outcome = await store.submitEvidence(for: occurrenceId, jpegData: jpegData)
+        handleSubmissionOutcome(outcome)
+    }
+
+    private func handleSubmissionOutcome(_ outcome: EvidenceSubmissionOutcome) {
+        guard case let .failed(message) = outcome else {
+            return
+        }
+
+        capturedImage = nil
+        privacyAlert = .submissionFailed(message)
     }
 
     private var framingGuides: some View {
@@ -479,6 +493,13 @@ private struct PhotoPrivacyAlert: Identifiable {
         title: "Photo check unavailable",
         message: "We could not safely check this photo for people, so it was not uploaded. Please take another photo."
     )
+
+    static func submissionFailed(_ message: String) -> PhotoPrivacyAlert {
+        PhotoPrivacyAlert(
+            title: "Photo not submitted",
+            message: message
+        )
+    }
 }
 
 struct CameraImagePicker: UIViewControllerRepresentable {
@@ -556,7 +577,6 @@ struct AIReviewResultView: View {
     var body: some View {
         let submission = occurrence.flatMap { store.submission(for: $0) }
         let result = submission?.aiResult
-        let confidence = Int((result?.confidence ?? 0) * 100)
 
         VStack(spacing: 26) {
             Spacer(minLength: 8)
@@ -567,25 +587,32 @@ struct AIReviewResultView: View {
             }
 
             VStack(spacing: 10) {
-                Text(result?.retakeSuggested == true ? "Try another photo" : "Looks good!")
+                Text(reviewTitle(for: result))
                     .font(.system(size: 34, weight: .heavy, design: .rounded))
-                Text(result?.reason ?? "Our AI saved the submission for parent review.")
+                Text(
+                    result?.reason ??
+                        "Your photo was submitted. The AI check is unavailable, so a parent can review it directly."
+                )
                     .font(.body)
                     .foregroundStyle(Color.mutedGray)
                     .multilineTextAlignment(.center)
             }
 
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Confidence")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(Color.mutedGray)
-                Text("\(confidence)%")
-                    .font(.system(size: 42, weight: .heavy, design: .rounded))
-                    .foregroundStyle(.green)
-                CapsuleProgress(value: Double(confidence) / 100)
-                    .tint(.green)
+            if let result {
+                let confidence = Int(result.confidence * 100)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("AI confidence in this review")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(Color.mutedGray)
+                    Text("\(confidence)%")
+                        .font(.system(size: 42, weight: .heavy, design: .rounded))
+                        .foregroundStyle(reviewTint(for: result))
+                    CapsuleProgress(value: result.confidence)
+                        .tint(reviewTint(for: result))
+                }
+                .cardSurface()
             }
-            .cardSurface()
 
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: "clock")
@@ -619,6 +646,36 @@ struct AIReviewResultView: View {
         .background(Color.paperWhite.ignoresSafeArea())
         .navigationTitle("AI Review")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func reviewTitle(for result: AIReviewResult?) -> String {
+        guard let result else {
+            return "Photo submitted"
+        }
+
+        if result.retakeSuggested {
+            return "Try another photo"
+        }
+
+        switch result.verdict {
+        case .likelyComplete:
+            return "Likely complete"
+        case .likelyIncomplete:
+            return "May be incomplete"
+        case .needsParentReview:
+            return "Needs a parent check"
+        }
+    }
+
+    private func reviewTint(for result: AIReviewResult) -> Color {
+        switch result.verdict {
+        case .likelyComplete:
+            return .green
+        case .likelyIncomplete:
+            return .warmOrange
+        case .needsParentReview:
+            return .warmOrange
+        }
     }
 }
 

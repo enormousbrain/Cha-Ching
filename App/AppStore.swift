@@ -577,23 +577,43 @@ final class AppStore: ObservableObject {
         }
     }
 
-    func submitEvidence(for occurrenceId: UUID, jpegData: Data? = nil) async {
+    @discardableResult
+    func submitEvidence(
+        for occurrenceId: UUID,
+        jpegData: Data? = nil
+    ) async -> EvidenceSubmissionOutcome {
         if let jpegData {
             do {
-                try await submitRemoteEvidence(for: occurrenceId, jpegData: jpegData)
-                return
+                return try await submitRemoteEvidence(
+                    for: occurrenceId,
+                    jpegData: jpegData
+                )
             } catch {
                 debugPrint("Remote evidence submission failed:", error.localizedDescription)
+                let message = "The photo could not be submitted. Check the connection and try again."
+                familySyncState = .failed(message)
+                return .failed(message)
             }
         }
 
+        #if DEBUG
         submitMockEvidence(for: occurrenceId)
+        return .reviewed
+        #else
+        let message = "Take a photo before submitting this chore."
+        familySyncState = .failed(message)
+        return .failed(message)
+        #endif
     }
 
     func submitWithoutPhoto(for occurrenceId: UUID) async {
         do {
             guard SupabaseClientProvider.shared.auth.currentSession != nil else {
+                #if DEBUG
                 submitLocalCompletion(for: occurrenceId)
+                #else
+                familySyncState = .failed("Sign in before submitting this chore.")
+                #endif
                 return
             }
 
@@ -607,17 +627,24 @@ final class AppStore: ObservableObject {
             )
         } catch {
             debugPrint("Remote no-photo submission failed:", error.localizedDescription)
+            #if DEBUG
             submitLocalCompletion(for: occurrenceId)
+            #else
+            familySyncState = .failed("The chore could not be submitted. Check the connection and try again.")
+            #endif
         }
     }
 
-    private func submitRemoteEvidence(for occurrenceId: UUID, jpegData: Data) async throws {
-        guard let index = occurrences.firstIndex(where: { $0.id == occurrenceId }) else {
-            return
+    private func submitRemoteEvidence(
+        for occurrenceId: UUID,
+        jpegData: Data
+    ) async throws -> EvidenceSubmissionOutcome {
+        guard let occurrence = occurrences.first(where: { $0.id == occurrenceId }) else {
+            throw EvidenceSubmissionError.occurrenceNotFound
         }
 
+        _ = try await remoteStore.currentSession()
         let submissionId = UUID()
-        let occurrence = occurrences[index]
         let imagePath = try await remoteStore.uploadEvidenceJPEG(
             familyId: familyId,
             occurrenceId: occurrenceId,
@@ -625,27 +652,63 @@ final class AppStore: ObservableObject {
             jpegData: jpegData
         )
 
-        _ = try await remoteStore.createChoreSubmission(
+        let registration = try await remoteStore.registerPhotoSubmission(
             id: submissionId,
             occurrenceId: occurrenceId,
-            childId: occurrence.childId,
             imagePath: imagePath
         )
 
-        let reviewResponse = try await remoteStore.reviewEvidence(submissionId: submissionId)
-        let submission = ChoreSubmission(
-            id: reviewResponse.submissionId,
-            taskOccurrenceId: reviewResponse.taskOccurrenceId,
+        let pendingSubmission = ChoreSubmission(
+            id: registration.submissionId,
+            taskOccurrenceId: registration.taskOccurrenceId,
             childId: occurrence.childId,
             imageName: imagePath,
-            aiResult: reviewResponse.aiResult.localResult
+            submittedAt: registration.submittedAt
         )
-
-        upsertSubmission(submission)
-        occurrences[index].submissionId = submission.id
-        occurrences[index].status = .aiReviewed
-        occurrences[index].updatedAt = Date()
+        upsertSubmission(pendingSubmission)
+        updateOccurrence(occurrenceId) { task in
+            task.submissionId = registration.submissionId
+            task.status = .submitted
+            task.updatedAt = Date()
+        }
         publishWidgetSnapshot()
+
+        do {
+            let reviewResponse = try await remoteStore.reviewEvidence(
+                submissionId: registration.submissionId
+            )
+            let submission = ChoreSubmission(
+                id: reviewResponse.submissionId,
+                taskOccurrenceId: reviewResponse.taskOccurrenceId,
+                childId: occurrence.childId,
+                imageName: imagePath,
+                submittedAt: registration.submittedAt,
+                aiResult: reviewResponse.aiResult.localResult
+            )
+
+            upsertSubmission(submission)
+            updateOccurrence(occurrenceId) { task in
+                task.submissionId = submission.id
+                task.status = .aiReviewed
+                task.updatedAt = Date()
+            }
+            publishWidgetSnapshot()
+            return .reviewed
+        } catch {
+            debugPrint("AI review unavailable after photo submission:", error.localizedDescription)
+            return .awaitingParentReview
+        }
+    }
+
+    func evidenceImageData(for submission: ChoreSubmission) async throws -> Data? {
+        let path = submission.imageName
+        let familyPrefix = "\(familyId.uuidString)/".lowercased()
+        guard path.lowercased().hasPrefix(familyPrefix) else {
+            return nil
+        }
+
+        _ = try await remoteStore.currentSession()
+        return try await remoteStore.downloadEvidence(path: path)
     }
 
     private func submitMockEvidence(for occurrenceId: UUID) {
@@ -1547,6 +1610,7 @@ final class AppStore: ObservableObject {
             reason: record.reason,
             retakeSuggested: record.retakeSuggested,
             retakeInstruction: record.retakeInstruction,
+            parentReviewPriority: record.parentReviewPriority,
             modelName: record.modelName,
             reviewedAt: record.reviewedAt
         )
@@ -1830,7 +1894,7 @@ final class AppStore: ObservableObject {
             .lowercased()
             .filter { $0.isLetter || $0.isNumber }
             .prefix(12)
-        return "\(prefix)-\(namePrefix)-\(UUID().uuidString.prefix(8).lowercased())"
+        return "\(prefix)-\(namePrefix)-\(UUID().uuidString.lowercased())"
     }
 
     private func inviteToken(from url: URL) -> String? {
@@ -2216,9 +2280,24 @@ private extension RemoteAIReviewResult {
             reason: reason,
             retakeSuggested: retakeSuggested,
             retakeInstruction: retakeInstruction,
+            parentReviewPriority: parentReviewPriority,
             modelName: modelName,
             reviewedAt: reviewedAt
         )
+    }
+}
+
+enum EvidenceSubmissionOutcome: Equatable {
+    case reviewed
+    case awaitingParentReview
+    case failed(String)
+}
+
+private enum EvidenceSubmissionError: LocalizedError {
+    case occurrenceNotFound
+
+    var errorDescription: String? {
+        "The chore is no longer available. Refresh and try again."
     }
 }
 

@@ -145,14 +145,6 @@
 			path = Configuration;
 			sourceTree = "<group>";
 		};
-		D00D00000000000000000073 /* Shared */ = {
-			isa = PBXGroup;
-			children = (
-				D00D00000000000000000072 /* WidgetSharedState.swift */,
-			);
-			path = Shared;
-			sourceTree = "<group>";
-		};
 		D00D00000000000000000011 /* App */ = {
 			isa = PBXGroup;
 			children = (
@@ -254,6 +246,14 @@
 				D00D00000000000000000074 /* ChaChingWidgets.entitlements */,
 			);
 			path = Widgets;
+			sourceTree = "<group>";
+		};
+		D00D00000000000000000073 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				D00D00000000000000000072 /* WidgetSharedState.swift */,
+			);
+			path = Shared;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -535,7 +535,7 @@
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CODE_SIGN_ENTITLEMENTS = App/ChaChing.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 12;
 				DEVELOPMENT_TEAM = 2LF847PDLK;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/Info.plist;
@@ -558,7 +558,7 @@
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CODE_SIGN_ENTITLEMENTS = App/ChaChing.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 12;
 				DEVELOPMENT_TEAM = 2LF847PDLK;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/Info.plist;

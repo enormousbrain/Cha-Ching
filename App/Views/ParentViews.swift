@@ -2,6 +2,7 @@ import AuthenticationServices
 import CryptoKit
 import Security
 import SwiftUI
+import UIKit
 
 struct ParentWorkspaceView: View {
     @State private var selectedTab: ParentTab = .review
@@ -135,7 +136,7 @@ struct ReviewCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 14) {
-                ReviewThumbnail(chore: chore)
+                ReviewEvidenceThumbnail(chore: chore, submission: submission)
 
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
@@ -148,20 +149,43 @@ struct ReviewCard: View {
                         statusBadge
                     }
 
-                    Text(submission?.submittedAt.formatted(date: .omitted, time: .shortened) ?? "No submission")
+                    Text(submissionSummary)
                         .font(.caption)
                         .foregroundStyle(Color.mutedGray)
 
                     if let result = submission?.aiResult {
-                        Text("AI: \(Int(result.confidence * 100))%")
+                        VStack(alignment: .leading, spacing: 3) {
+                            Label(verdictText(for: result), systemImage: verdictIcon(for: result))
+                                .foregroundStyle(verdictColor(for: result))
+                            Text("AI confidence: \(Int(result.confidence * 100))%")
+                                .foregroundStyle(Color.mutedGray)
+                        }
+                        .font(.subheadline.weight(.bold))
+                    } else if submission != nil {
+                        Label("Parent review needed", systemImage: "person.crop.circle.badge.questionmark")
                             .font(.subheadline.weight(.bold))
-                            .foregroundStyle(result.confidence >= 0.85 ? .green : .warmOrange)
-                    } else {
+                            .foregroundStyle(Color.sunYellow)
+                    } else if occurrence.status.isOpen {
                         Text("Miss it: \(Money.dollars(-chore.deductionCents, signed: true))")
                             .font(.subheadline.weight(.bold))
                             .foregroundStyle(Color.warmOrange)
+                    } else if occurrence.status == .rejected || occurrence.status == .missed {
+                        Text("Deduction: \(Money.dollars(-chore.deductionCents, signed: true))")
+                            .font(.subheadline.weight(.bold))
+                            .foregroundStyle(Color.warmOrange)
+                    } else {
+                        Text("No photo evidence")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Color.mutedGray)
                     }
                 }
+            }
+
+            if let reason = submission?.aiResult?.reason {
+                Text(reason)
+                    .font(.subheadline)
+                    .foregroundStyle(Color.mutedGray)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if occurrence.status.needsParentReview {
@@ -224,6 +248,23 @@ struct ReviewCard: View {
             .background(badgeColor, in: Capsule())
     }
 
+    private var submissionSummary: String {
+        if let submission {
+            return submission.submittedAt.formatted(date: .omitted, time: .shortened)
+        }
+
+        switch occurrence.status {
+        case .approved:
+            return "Completed"
+        case .excused:
+            return "Excused"
+        case .rejected, .missed:
+            return "Closed without evidence"
+        case .upcoming, .due, .submitted, .aiReviewed:
+            return "No submission"
+        }
+    }
+
     private var badgeText: String {
         switch occurrence.status {
         case .submitted, .aiReviewed:
@@ -255,12 +296,103 @@ struct ReviewCard: View {
             return .softGray
         }
     }
+
+    private func verdictText(for result: AIReviewResult) -> String {
+        switch result.verdict {
+        case .likelyComplete:
+            return "Likely complete"
+        case .likelyIncomplete:
+            return "Likely incomplete"
+        case .needsParentReview:
+            return "Needs a closer look"
+        }
+    }
+
+    private func verdictIcon(for result: AIReviewResult) -> String {
+        switch result.verdict {
+        case .likelyComplete:
+            return "checkmark.circle.fill"
+        case .likelyIncomplete:
+            return "exclamationmark.triangle.fill"
+        case .needsParentReview:
+            return "questionmark.circle.fill"
+        }
+    }
+
+    private func verdictColor(for result: AIReviewResult) -> Color {
+        switch result.verdict {
+        case .likelyComplete:
+            return .green
+        case .likelyIncomplete:
+            return .warmOrange
+        case .needsParentReview:
+            return .warmOrange
+        }
+    }
 }
 
-struct ReviewThumbnail: View {
+struct ReviewEvidenceThumbnail: View {
+    @EnvironmentObject private var store: AppStore
+    @State private var image: UIImage?
+    @State private var isLoading = false
+    @State private var loadFailed = false
+    @State private var isShowingEvidence = false
+
     var chore: ChoreDefinition
+    var submission: ChoreSubmission?
 
     var body: some View {
+        Button {
+            guard image != nil else {
+                return
+            }
+            isShowingEvidence = true
+        } label: {
+            thumbnail
+        }
+        .buttonStyle(.plain)
+        .disabled(image == nil)
+        .accessibilityLabel(image == nil ? "No evidence photo available" : "View evidence photo")
+        .task(id: submission?.imageName) {
+            await loadEvidence()
+        }
+        .fullScreenCover(isPresented: $isShowingEvidence) {
+            EvidencePhotoViewer(image: image, choreTitle: chore.title)
+        }
+    }
+
+    @ViewBuilder
+    private var thumbnail: some View {
+        if let image {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 76, height: 76)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(alignment: .bottomTrailing) {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(Color.brandWhite)
+                        .padding(6)
+                        .background(Color.brandBlack.opacity(0.72), in: Circle())
+                        .padding(5)
+                }
+        } else {
+            placeholder
+                .overlay {
+                    if isLoading {
+                        ProgressView()
+                            .tint(Color.brandWhite)
+                    } else if loadFailed {
+                        Image(systemName: "photo.badge.exclamationmark")
+                            .font(.title2.weight(.bold))
+                            .foregroundStyle(Color.brandWhite)
+                    }
+                }
+        }
+    }
+
+    private var placeholder: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(
@@ -272,11 +404,40 @@ struct ReviewThumbnail: View {
                 )
                 .frame(width: 76, height: 76)
 
-            Image(systemName: iconName)
-                .font(.title.weight(.bold))
-                .foregroundStyle(Color.brandWhite)
+            if !isLoading && !loadFailed {
+                Image(systemName: iconName)
+                    .font(.title.weight(.bold))
+                    .foregroundStyle(Color.brandWhite)
+            }
         }
-        .accessibilityHidden(true)
+    }
+
+    @MainActor
+    private func loadEvidence() async {
+        image = nil
+        loadFailed = false
+
+        guard let submission,
+              submission.imageName.contains("/"),
+              !submission.imageName.hasPrefix("mock-")
+        else {
+            return
+        }
+
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            guard let data = try await store.evidenceImageData(for: submission),
+                  let loadedImage = UIImage(data: data)
+            else {
+                loadFailed = true
+                return
+            }
+            image = loadedImage
+        } catch {
+            loadFailed = true
+        }
     }
 
     private var thumbnailColors: [Color] {
@@ -297,6 +458,40 @@ struct ReviewThumbnail: View {
             return "shower.fill"
         }
         return "bed.double.fill"
+    }
+}
+
+private struct EvidencePhotoViewer: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var image: UIImage?
+    var choreTitle: String
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Color.brandBlack.ignoresSafeArea()
+
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .accessibilityLabel("Evidence photo for \(choreTitle)")
+                }
+            }
+            .navigationTitle(choreTitle)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarColorScheme(.dark, for: .navigationBar)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                    .fontWeight(.semibold)
+                }
+            }
+        }
     }
 }
 

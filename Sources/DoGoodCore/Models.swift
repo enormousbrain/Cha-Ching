@@ -702,14 +702,32 @@ public struct TaskOccurrence: Identifiable, Codable, Equatable, Sendable {
     }
 }
 
+public enum AIReviewVerdict: String, Codable, Equatable, Sendable {
+    case likelyComplete
+    case likelyIncomplete
+    case needsParentReview
+}
+
 public struct AIReviewResult: Codable, Equatable, Sendable {
     public var completed: Bool?
     public var confidence: Double
     public var reason: String
     public var retakeSuggested: Bool
     public var retakeInstruction: String?
+    public var parentReviewPriority: String?
     public var modelName: String?
     public var reviewedAt: Date
+
+    public var verdict: AIReviewVerdict {
+        switch completed {
+        case true:
+            return .likelyComplete
+        case false:
+            return .likelyIncomplete
+        case nil:
+            return .needsParentReview
+        }
+    }
 
     public init(
         completed: Bool?,
@@ -717,6 +735,7 @@ public struct AIReviewResult: Codable, Equatable, Sendable {
         reason: String,
         retakeSuggested: Bool,
         retakeInstruction: String? = nil,
+        parentReviewPriority: String? = nil,
         modelName: String? = "mock-local-reviewer",
         reviewedAt: Date = Date()
     ) {
@@ -725,6 +744,7 @@ public struct AIReviewResult: Codable, Equatable, Sendable {
         self.reason = reason
         self.retakeSuggested = retakeSuggested
         self.retakeInstruction = retakeInstruction
+        self.parentReviewPriority = parentReviewPriority
         self.modelName = modelName
         self.reviewedAt = reviewedAt
     }

@@ -210,14 +210,14 @@ struct MessageComposerView: UIViewControllerRepresentable {
         Coordinator(dismiss: dismiss)
     }
 
-    final class Coordinator: NSObject, MFMessageComposeViewControllerDelegate {
+    final class Coordinator: NSObject, @MainActor MFMessageComposeViewControllerDelegate {
         private let dismiss: DismissAction
 
         init(dismiss: DismissAction) {
             self.dismiss = dismiss
         }
 
-        func messageComposeViewController(
+        @MainActor func messageComposeViewController(
             _ controller: MFMessageComposeViewController,
             didFinishWith result: MessageComposeResult
         ) {

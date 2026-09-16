@@ -578,7 +578,9 @@ struct SupabaseRemoteStore: Sendable {
         submissionId: UUID,
         jpegData: Data
     ) async throws -> String {
-        let path = "\(familyId.uuidString)/\(occurrenceId.uuidString)/\(submissionId.uuidString).jpg"
+        let path = [familyId, occurrenceId, submissionId]
+            .map { $0.uuidString.lowercased() }
+            .joined(separator: "/") + ".jpg"
         let response = try await client.storage
             .from(SupabaseConfig.evidenceBucketName)
             .upload(
@@ -594,26 +596,34 @@ struct SupabaseRemoteStore: Sendable {
         return response.path
     }
 
-    func createChoreSubmission(
+    func downloadEvidence(path: String) async throws -> Data {
+        try await client.storage
+            .from(SupabaseConfig.evidenceBucketName)
+            .download(path: path)
+    }
+
+    func registerPhotoSubmission(
         id: UUID,
         occurrenceId: UUID,
-        childId: UUID,
-        imagePath: String?
-    ) async throws -> ChoreSubmissionRecord {
-        let payload = ChoreSubmissionInsert(
-            id: id,
-            taskOccurrenceId: occurrenceId,
-            childId: childId,
-            imagePath: imagePath
-        )
-
-        return try await client
-            .from("chore_submissions")
-            .insert(payload)
-            .select()
-            .single()
+        imagePath: String
+    ) async throws -> PhotoSubmissionResponse {
+        let responses: [PhotoSubmissionResponse] = try await client
+            .rpc(
+                "register_chore_photo_submission",
+                params: PhotoSubmissionParams(
+                    targetSubmissionId: id,
+                    targetOccurrenceId: occurrenceId,
+                    targetImagePath: imagePath
+                )
+            )
             .execute()
             .value
+
+        guard let response = responses.first else {
+            throw SupabaseRemoteStoreError.emptyPhotoSubmissionResponse
+        }
+
+        return response
     }
 
     func submitChoreWithoutPhoto(occurrenceId: UUID) async throws -> NoPhotoSubmissionResponse {
@@ -711,6 +721,7 @@ enum SupabaseRemoteStoreError: LocalizedError {
     case emptyChoreLifecycleResponse
     case emptyParentReviewDecisionResponse
     case emptyNoPhotoSubmissionResponse
+    case emptyPhotoSubmissionResponse
 
     var errorDescription: String? {
         switch self {
@@ -726,6 +737,8 @@ enum SupabaseRemoteStoreError: LocalizedError {
             return "Supabase did not return the reviewed task."
         case .emptyNoPhotoSubmissionResponse:
             return "Supabase did not return the submitted task."
+        case .emptyPhotoSubmissionResponse:
+            return "Supabase did not register the photo submission."
         }
     }
 }
@@ -996,17 +1009,15 @@ private struct TaskNudgeDeliveryUpdate: Encodable {
     }
 }
 
-private struct ChoreSubmissionInsert: Encodable {
-    let id: UUID
-    let taskOccurrenceId: UUID
-    let childId: UUID
-    let imagePath: String?
+private struct PhotoSubmissionParams: Encodable {
+    let targetSubmissionId: UUID
+    let targetOccurrenceId: UUID
+    let targetImagePath: String
 
     enum CodingKeys: String, CodingKey {
-        case id
-        case taskOccurrenceId = "task_occurrence_id"
-        case childId = "child_id"
-        case imagePath = "image_path"
+        case targetSubmissionId = "target_submission_id"
+        case targetOccurrenceId = "target_occurrence_id"
+        case targetImagePath = "target_image_path"
     }
 }
 

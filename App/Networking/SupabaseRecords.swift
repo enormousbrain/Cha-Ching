@@ -340,6 +340,8 @@ struct NoPhotoSubmissionResponse: Decodable, Sendable {
     }
 }
 
+typealias PhotoSubmissionResponse = NoPhotoSubmissionResponse
+
 struct ReviewEvidenceResponse: Decodable, Sendable {
     let submissionId: UUID
     let taskOccurrenceId: UUID
