@@ -165,6 +165,7 @@ supabase/migrations/0011_chore_lifecycle.sql
 supabase/migrations/0012_evidence_deletion_schedule.sql
 supabase/migrations/0013_retention_cleanup.sql
 supabase/migrations/0014_submission_registration.sql
+supabase/migrations/0015_automatic_family_maintenance.sql
 ```
 
 `0004_family_bootstrap.sql` adds the `bootstrap_preview_family` RPC used by the parent Family Sync card. A signed-in parent can create the initial remote family, child profile, current week, starting allowance ledger entry, and preview chore schedule from the app.
@@ -188,6 +189,8 @@ supabase/migrations/0014_submission_registration.sql
 `0013_retention_cleanup.sql` allows expired invite token hashes to be cleared after the invite is no longer usable.
 
 `0014_submission_registration.sql` adds an authenticated, transactional photo-submission RPC and hardens no-photo submissions so only the linked child account with a child family role can submit assigned chores.
+
+`0015_automatic_family_maintenance.sql` moves allowance-period and task-deadline maintenance into idempotent server functions and installs a Supabase `pg_cron` job that runs every 15 minutes. After a parent saves the allowance amount, cadence, and next allowance date, periods close and reopen automatically, rollover debt is applied, missed deductions are created, and the current day's recurring chores are generated even when no phone opens the app. App refresh continues to call the same maintenance RPCs as an immediate fallback.
 
 Evidence files should be stored under paths beginning with the family id:
 
@@ -288,14 +291,15 @@ psql "postgresql://postgres:${SUPABASE_DB_PASSWORD}@db.pjvgtmxyxrfhabyuefne.supa
   -f supabase/migrations/0013_retention_cleanup.sql
 psql "postgresql://postgres:${SUPABASE_DB_PASSWORD}@db.pjvgtmxyxrfhabyuefne.supabase.co:5432/postgres" \
   -f supabase/migrations/0014_submission_registration.sql
+psql "postgresql://postgres:${SUPABASE_DB_PASSWORD}@db.pjvgtmxyxrfhabyuefne.supabase.co:5432/postgres" \
+  -f supabase/migrations/0015_automatic_family_maintenance.sql
 ```
 
 ## Next Slices
 
 1. Accept Zoe's child invite, then smoke-test photo upload, on-device people blocking, AI review, and parent evidence viewing across two physical devices.
 2. Add APNs-backed instant sync and parent-to-child nudges.
-3. Make allowance-period boundaries and rollover closeout fully server-authoritative.
-4. Replace the earnings screen's sample daily breakdown with real ledger history and add archived-period browsing.
-5. Remove remaining production local-only mutation fallbacks so remote write failures are always explicit and retryable.
-6. Add a dedicated child allowance-day celebration and parent closeout review before the payment request handoff.
-7. Add orphaned-upload cleanup as a backstop for uploads interrupted before submission registration.
+3. Replace the earnings screen's sample daily breakdown with real ledger history and add archived-period browsing.
+4. Remove remaining production local-only mutation fallbacks so remote write failures are always explicit and retryable.
+5. Add a dedicated child allowance-day celebration and parent closeout review before the payment request handoff.
+6. Add orphaned-upload cleanup as a backstop for uploads interrupted before submission registration.
