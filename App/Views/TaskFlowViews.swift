@@ -77,13 +77,16 @@ struct TaskDetailView: View {
                         }
 
                         Button {
-                            store.requestExcuse(occurrence)
+                            Task {
+                                await store.requestExcuse(occurrence)
+                            }
                         } label: {
                             Text("I can't do this")
                                 .font(.subheadline.weight(.semibold))
                                 .frame(maxWidth: .infinity)
                                 .foregroundStyle(Color.mutedGray)
                         }
+                        .disabled(store.isMutationInFlight || !occurrence.status.isOpen)
                         .accessibilityHint("Sends a parent review request")
                     }
                     .padding(22)

@@ -296,7 +296,7 @@ struct SupabaseRemoteStore: Sendable {
 
         return try await client
             .from("child_invites")
-            .insert(payload)
+            .upsert(payload, onConflict: "id")
             .select()
             .single()
             .execute()
@@ -324,7 +324,29 @@ struct SupabaseRemoteStore: Sendable {
 
         return try await client
             .from("parent_invites")
-            .insert(payload)
+            .upsert(payload, onConflict: "id")
+            .select()
+            .single()
+            .execute()
+            .value
+    }
+
+    func revokeChildInvite(id: UUID) async throws -> ChildInviteRecord {
+        try await client
+            .from("child_invites")
+            .update(InviteStatusUpdate(status: ChildInviteStatus.revoked.rawValue))
+            .eq("id", value: id.uuidString)
+            .select()
+            .single()
+            .execute()
+            .value
+    }
+
+    func revokeParentInvite(id: UUID) async throws -> ParentInviteRecord {
+        try await client
+            .from("parent_invites")
+            .update(InviteStatusUpdate(status: ParentInviteStatus.revoked.rawValue))
+            .eq("id", value: id.uuidString)
             .select()
             .single()
             .execute()
@@ -393,7 +415,7 @@ struct SupabaseRemoteStore: Sendable {
 
         return try await client
             .from("chore_definitions")
-            .insert(payload)
+            .upsert(payload, onConflict: "id")
             .select()
             .single()
             .execute()
@@ -466,7 +488,7 @@ struct SupabaseRemoteStore: Sendable {
 
         return try await client
             .from("task_occurrences")
-            .insert(payload)
+            .upsert(payload, onConflict: "id")
             .select()
             .single()
             .execute()
@@ -521,7 +543,7 @@ struct SupabaseRemoteStore: Sendable {
 
         return try await client
             .from("ledger_entries")
-            .insert(payload)
+            .upsert(payload, onConflict: "id")
             .select()
             .single()
             .execute()
@@ -676,6 +698,28 @@ struct SupabaseRemoteStore: Sendable {
         return response
     }
 
+    func requestChoreExcuse(
+        occurrenceId: UUID,
+        reason: String
+    ) async throws -> ChoreExcuseRequestResponse {
+        let responses: [ChoreExcuseRequestResponse] = try await client
+            .rpc(
+                "request_chore_excuse",
+                params: ChoreExcuseRequestParams(
+                    targetOccurrenceId: occurrenceId,
+                    targetReason: reason
+                )
+            )
+            .execute()
+            .value
+
+        guard let response = responses.first else {
+            throw SupabaseRemoteStoreError.emptyChoreExcuseRequestResponse
+        }
+
+        return response
+    }
+
     private func sha256Hex(_ value: String) -> String {
         SHA256.hash(data: Data(value.utf8))
             .map { String(format: "%02x", $0) }
@@ -720,6 +764,7 @@ enum SupabaseRemoteStoreError: LocalizedError {
     case emptyTaskDeadlinesResponse
     case emptyChoreLifecycleResponse
     case emptyParentReviewDecisionResponse
+    case emptyChoreExcuseRequestResponse
     case emptyNoPhotoSubmissionResponse
     case emptyPhotoSubmissionResponse
 
@@ -735,6 +780,8 @@ enum SupabaseRemoteStoreError: LocalizedError {
             return "Supabase did not return the updated chore status."
         case .emptyParentReviewDecisionResponse:
             return "Supabase did not return the reviewed task."
+        case .emptyChoreExcuseRequestResponse:
+            return "Supabase did not return the parent review request."
         case .emptyNoPhotoSubmissionResponse:
             return "Supabase did not return the submitted task."
         case .emptyPhotoSubmissionResponse:
@@ -821,6 +868,10 @@ private struct ParentInviteInsert: Encodable {
         case tokenHash = "token_hash"
         case expiresAt = "expires_at"
     }
+}
+
+private struct InviteStatusUpdate: Encodable {
+    let status: String
 }
 
 private struct FamilyAllowanceSettingsUpdate: Encodable {
@@ -1046,6 +1097,16 @@ private struct ParentReviewDecisionParams: Encodable {
         case targetOccurrenceId = "target_occurrence_id"
         case targetDecision = "target_decision"
         case targetNote = "target_note"
+    }
+}
+
+private struct ChoreExcuseRequestParams: Encodable {
+    let targetOccurrenceId: UUID
+    let targetReason: String
+
+    enum CodingKeys: String, CodingKey {
+        case targetOccurrenceId = "target_occurrence_id"
+        case targetReason = "target_reason"
     }
 }
 

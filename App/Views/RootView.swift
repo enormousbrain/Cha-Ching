@@ -19,6 +19,13 @@ struct RootView: View {
             InviteLandingSheet(invite: invite)
                 .environmentObject(store)
         }
+        .alert(item: $store.mutationFailure) { failure in
+            Alert(
+                title: Text(failure.title),
+                message: Text(failure.message),
+                dismissButton: .default(Text("Keep Editing"))
+            )
+        }
         .task {
             await store.loadRemoteFamilyStateIfSignedIn(force: true)
             await store.refreshNotificationScheduleIfAuthorized()

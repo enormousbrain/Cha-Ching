@@ -191,27 +191,45 @@ struct ReviewCard: View {
             if occurrence.status.needsParentReview {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
                     SecondaryActionButton(title: "Approve", systemImage: "checkmark.circle.fill", tint: .acidLime) {
-                        store.approve(occurrence)
+                        Task {
+                            await store.approve(occurrence)
+                        }
                     }
+                    .disabled(store.isMutationInFlight)
                     SecondaryActionButton(title: "Reject", systemImage: "xmark.circle.fill", tint: .warmOrange) {
-                        store.reject(occurrence)
+                        Task {
+                            await store.reject(occurrence)
+                        }
                     }
+                    .disabled(store.isMutationInFlight)
                     SecondaryActionButton(
                         title: "Excuse",
                         systemImage: "hand.raised.fill",
                         tint: .electricBlue.opacity(0.62),
                         foregroundColor: .brandWhite
                     ) {
-                        store.excuse(occurrence, reason: "Parent excused")
+                        Task {
+                            await store.excuse(occurrence, reason: "Parent excused")
+                        }
                     }
+                    .disabled(store.isMutationInFlight)
                     SecondaryActionButton(
                         title: "Retake",
                         systemImage: "camera.rotate.fill",
                         tint: .softGray,
                         foregroundColor: .inkBlack
                     ) {
-                        store.requestRetake(occurrence)
+                        Task {
+                            await store.requestRetake(occurrence)
+                        }
                     }
+                    .disabled(store.isMutationInFlight)
+                }
+
+                if let activeMutationTitle = store.activeMutationTitle {
+                    ProgressView(activeMutationTitle)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.mutedGray)
                 }
             } else if occurrence.status.isOpen {
                 SecondaryActionButton(
@@ -582,6 +600,8 @@ struct FamilyManagementView: View {
     @SceneStorage("chaching.family.childPhoneDraft") private var phoneNumber = ""
     @SceneStorage("chaching.family.parentNameDraft") private var parentName = "Mamma"
     @SceneStorage("chaching.family.parentPhoneDraft") private var parentPhoneNumber = ""
+    @State private var childInviteDraftId = UUID()
+    @State private var parentInviteDraftId = UUID()
 
     var body: some View {
         ScrollView {
@@ -634,7 +654,14 @@ struct FamilyManagementView: View {
 
                         PrimaryButton(title: "Create Parent Invite", systemImage: "person.badge.plus") {
                             Task {
-                                await store.createParentInvite(parentName: parentName, phoneNumber: parentPhoneNumber)
+                                let saved = await store.createParentInvite(
+                                    id: parentInviteDraftId,
+                                    parentName: parentName,
+                                    phoneNumber: parentPhoneNumber
+                                )
+                                if saved {
+                                    parentInviteDraftId = UUID()
+                                }
                             }
                         }
                         .disabled(store.inviteCreationState.isWorking)
@@ -685,7 +712,14 @@ struct FamilyManagementView: View {
 
                         PrimaryButton(title: "Create Child Invite", systemImage: "link.badge.plus") {
                             Task {
-                                await store.createChildInvite(childName: childName, phoneNumber: phoneNumber)
+                                let saved = await store.createChildInvite(
+                                    id: childInviteDraftId,
+                                    childName: childName,
+                                    phoneNumber: phoneNumber
+                                )
+                                if saved {
+                                    childInviteDraftId = UUID()
+                                }
                             }
                         }
                         .disabled(store.inviteCreationState.isWorking)
@@ -1065,50 +1099,49 @@ private enum AppleSignInError: LocalizedError {
 struct AllowanceSettingsCard: View {
     @EnvironmentObject private var store: AppStore
     @State private var allowanceAmount = ""
+    @State private var draftCadence: AllowanceCadence = .weekly
+    @State private var draftWeekday: AllowanceWeekday = .friday
+    @State private var draftNextAllowanceDate = Date()
+    @State private var isSaving = false
     @FocusState private var isAllowanceAmountFocused: Bool
 
     private var parsedAllowanceCents: Int? {
         Money.cents(fromDollarString: allowanceAmount)
     }
 
-    private var allowanceAmountHasChanges: Bool {
+    private var hasChanges: Bool {
         parsedAllowanceCents != store.allowanceSettings.baseAllowanceCents
-    }
-
-    private var cadenceBinding: Binding<AllowanceCadence> {
-        Binding {
-            store.allowanceSettings.cadence
-        } set: { cadence in
-            store.updateAllowanceSettings(
-                cadence: cadence,
-                allowanceWeekday: store.allowanceSettings.allowanceWeekday,
-                nextAllowanceDate: store.allowanceSettings.nextAllowanceDate
+            || draftCadence != store.allowanceSettings.cadence
+            || draftWeekday != store.allowanceSettings.allowanceWeekday
+            || !Calendar.current.isDate(
+                draftNextAllowanceDate,
+                inSameDayAs: store.allowanceSettings.nextAllowanceDate
             )
-        }
     }
 
-    private var weekdayBinding: Binding<AllowanceWeekday> {
+    private var draftNextScheduledDate: Date {
+        AllowanceSettings(
+            familyId: store.allowanceSettings.familyId,
+            baseAllowanceCents: parsedAllowanceCents ?? store.allowanceSettings.baseAllowanceCents,
+            cadence: draftCadence,
+            allowanceWeekday: draftWeekday,
+            nextAllowanceDate: draftNextAllowanceDate
+        ).nextScheduledAllowanceDate()
+    }
+
+    private var draftWeekdayBinding: Binding<AllowanceWeekday> {
         Binding {
-            store.allowanceSettings.allowanceWeekday
+            draftWeekday
         } set: { weekday in
-            let updated = store.allowanceSettings.withWeekday(weekday)
-            store.updateAllowanceSettings(
-                cadence: updated.cadence,
-                allowanceWeekday: updated.allowanceWeekday,
-                nextAllowanceDate: updated.nextAllowanceDate
+            draftWeekday = weekday
+            var components = Calendar.current.dateComponents(
+                [.yearForWeekOfYear, .weekOfYear],
+                from: draftNextAllowanceDate
             )
-        }
-    }
-
-    private var nextDateBinding: Binding<Date> {
-        Binding {
-            store.allowanceSettings.nextAllowanceDate
-        } set: { date in
-            store.updateAllowanceSettings(
-                cadence: store.allowanceSettings.cadence,
-                allowanceWeekday: AllowanceWeekday(rawValue: Calendar.current.component(.weekday, from: date)) ?? store.allowanceSettings.allowanceWeekday,
-                nextAllowanceDate: date
-            )
+            components.weekday = weekday.rawValue
+            if let alignedDate = Calendar.current.date(from: components) {
+                draftNextAllowanceDate = alignedDate
+            }
         }
     }
 
@@ -1135,15 +1168,10 @@ struct AllowanceSettingsCard: View {
                             .focused($isAllowanceAmountFocused)
                             .frame(width: 82)
 
-                        Button {
-                            saveAllowanceAmount()
-                        } label: {
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(.title3)
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(parsedAllowanceCents == nil || !allowanceAmountHasChanges)
-                        .accessibilityLabel("Save allowance amount")
+                        Image(systemName: parsedAllowanceCents == nil ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
+                            .font(.title3)
+                            .foregroundStyle(parsedAllowanceCents == nil ? Color.warmOrange : Color.inkBlack)
+                            .accessibilityHidden(true)
                     }
                     .padding(.horizontal, 10)
                     .frame(height: 42)
@@ -1155,23 +1183,23 @@ struct AllowanceSettingsCard: View {
                     .foregroundStyle(Color.mutedGray)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                Picker("Cadence", selection: cadenceBinding) {
+                Picker("Cadence", selection: $draftCadence) {
                     ForEach(AllowanceCadence.allCases) { cadence in
                         Text(cadence.title).tag(cadence)
                     }
                 }
                 .pickerStyle(.segmented)
 
-                Picker("Allowance day", selection: weekdayBinding) {
+                Picker("Allowance day", selection: draftWeekdayBinding) {
                     ForEach(AllowanceWeekday.allCases) { weekday in
                         Text(weekday.title).tag(weekday)
                     }
                 }
 
-                if store.allowanceSettings.cadence == .everyTwoWeeks {
+                if draftCadence == .everyTwoWeeks {
                     DatePicker(
                         "Next payday",
-                        selection: nextDateBinding,
+                        selection: $draftNextAllowanceDate,
                         displayedComponents: .date
                     )
                 }
@@ -1181,10 +1209,18 @@ struct AllowanceSettingsCard: View {
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(Color.mutedGray)
                     Spacer()
-                    Text(store.nextAllowanceDate.formatted(date: .abbreviated, time: .omitted))
+                    Text(draftNextScheduledDate.formatted(date: .abbreviated, time: .omitted))
                         .font(.subheadline.weight(.heavy))
                         .foregroundStyle(Color.inkBlack)
                 }
+
+                PrimaryButton(
+                    title: isSaving ? "Saving" : "Save Schedule",
+                    systemImage: isSaving ? "arrow.triangle.2.circlepath" : "checkmark.circle.fill"
+                ) {
+                    saveAllowanceSettings()
+                }
+                .disabled(parsedAllowanceCents == nil || !hasChanges || isSaving)
 
                 PrimaryButton(title: "Schedule Reminders", systemImage: "bell.badge.fill") {
                     Task {
@@ -1207,11 +1243,11 @@ struct AllowanceSettingsCard: View {
             )
         }
         .onAppear {
-            refreshAllowanceAmount()
+            refreshDrafts()
         }
-        .onChange(of: store.allowanceSettings.baseAllowanceCents) { _, _ in
-            guard !isAllowanceAmountFocused else { return }
-            refreshAllowanceAmount()
+        .onChange(of: store.allowanceSettings) { _, _ in
+            guard !isAllowanceAmountFocused, !isSaving else { return }
+            refreshDrafts()
         }
         .toolbar {
             ToolbarItemGroup(placement: .keyboard) {
@@ -1223,31 +1259,50 @@ struct AllowanceSettingsCard: View {
         }
     }
 
-    private func saveAllowanceAmount() {
+    private func saveAllowanceSettings() {
         guard let cents = parsedAllowanceCents else { return }
 
-        store.updateAllowanceSettings(
-            cadence: store.allowanceSettings.cadence,
-            allowanceWeekday: store.allowanceSettings.allowanceWeekday,
-            nextAllowanceDate: store.allowanceSettings.nextAllowanceDate,
-            baseAllowanceCents: cents
-        )
         isAllowanceAmountFocused = false
-        allowanceAmount = Money.dollars(cents).replacingOccurrences(of: "$", with: "")
+        isSaving = true
+        Task {
+            let saved = await store.updateAllowanceSettings(
+                cadence: draftCadence,
+                allowanceWeekday: draftWeekday,
+                nextAllowanceDate: draftNextAllowanceDate,
+                baseAllowanceCents: cents
+            )
+            isSaving = false
+            if saved {
+                refreshDrafts()
+            }
+        }
     }
 
-    private func refreshAllowanceAmount() {
+    private func refreshDrafts() {
         allowanceAmount = Money.dollars(store.allowanceSettings.baseAllowanceCents)
             .replacingOccurrences(of: "$", with: "")
+        draftCadence = store.allowanceSettings.cadence
+        draftWeekday = store.allowanceSettings.allowanceWeekday
+        draftNextAllowanceDate = store.allowanceSettings.nextAllowanceDate
     }
 }
 
 struct EvidencePrivacySettingsCard: View {
     @EnvironmentObject private var store: AppStore
+    @State private var draftPolicy: FamilyEvidencePolicy?
+    @State private var isSaving = false
+
+    private var policy: FamilyEvidencePolicy {
+        draftPolicy ?? store.evidencePolicy
+    }
+
+    private var hasChanges: Bool {
+        draftPolicy != nil && draftPolicy != store.evidencePolicy
+    }
 
     private var photoEvidenceBinding: Binding<Bool> {
         Binding {
-            store.evidencePolicy.photoEvidenceEnabled
+            policy.photoEvidenceEnabled
         } set: { value in
             updatePolicy { $0.photoEvidenceEnabled = value }
         }
@@ -1255,7 +1310,7 @@ struct EvidencePrivacySettingsCard: View {
 
     private var defaultVerificationBinding: Binding<VerificationMode> {
         Binding {
-            store.evidencePolicy.defaultVerificationMode
+            policy.defaultVerificationMode
         } set: { value in
             updatePolicy { $0.defaultVerificationMode = value }
         }
@@ -1263,7 +1318,7 @@ struct EvidencePrivacySettingsCard: View {
 
     private var blockPeopleBinding: Binding<Bool> {
         Binding {
-            store.evidencePolicy.blockPeopleInPhotos
+            policy.blockPeopleInPhotos
         } set: { value in
             updatePolicy { $0.blockPeopleInPhotos = value }
         }
@@ -1271,7 +1326,7 @@ struct EvidencePrivacySettingsCard: View {
 
     private var retentionBinding: Binding<EvidenceRetentionMode> {
         Binding {
-            store.evidencePolicy.evidenceRetentionMode
+            policy.evidenceRetentionMode
         } set: { value in
             updatePolicy { $0.evidenceRetentionMode = value }
         }
@@ -1279,7 +1334,7 @@ struct EvidencePrivacySettingsCard: View {
 
     private var graceBinding: Binding<Int> {
         Binding {
-            store.evidencePolicy.deleteGraceMinutes
+            policy.deleteGraceMinutes
         } set: { value in
             updatePolicy { $0.deleteGraceMinutes = value }
         }
@@ -1287,7 +1342,7 @@ struct EvidencePrivacySettingsCard: View {
 
     private var periodCloseBinding: Binding<Int> {
         Binding {
-            store.evidencePolicy.deleteAfterPeriodCloseDays
+            policy.deleteAfterPeriodCloseDays
         } set: { value in
             updatePolicy { $0.deleteAfterPeriodCloseDays = value }
         }
@@ -1310,28 +1365,36 @@ struct EvidencePrivacySettingsCard: View {
 
                 Toggle("Block people in photos", isOn: blockPeopleBinding)
                     .font(.body.weight(.semibold))
-                    .disabled(!store.evidencePolicy.photoEvidenceEnabled)
+                    .disabled(!policy.photoEvidenceEnabled)
 
                 Picker("Delete photos", selection: retentionBinding) {
                     ForEach(EvidenceRetentionMode.allCases) { mode in
                         Text(mode.title).tag(mode)
                     }
                 }
-                .disabled(!store.evidencePolicy.photoEvidenceEnabled)
+                .disabled(!policy.photoEvidenceEnabled)
 
                 Stepper(value: graceBinding, in: 0...60, step: 5) {
-                    Label("\(store.evidencePolicy.deleteGraceMinutes) min undo", systemImage: "arrow.uturn.backward.circle")
+                    Label("\(policy.deleteGraceMinutes) min undo", systemImage: "arrow.uturn.backward.circle")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(Color.inkBlack)
                 }
-                .disabled(!store.evidencePolicy.photoEvidenceEnabled)
+                .disabled(!policy.photoEvidenceEnabled)
 
                 Stepper(value: periodCloseBinding, in: 0...7) {
-                    Label("\(store.evidencePolicy.deleteAfterPeriodCloseDays) day cleanup", systemImage: "calendar.badge.clock")
+                    Label("\(policy.deleteAfterPeriodCloseDays) day cleanup", systemImage: "calendar.badge.clock")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(Color.inkBlack)
                 }
-                .disabled(!store.evidencePolicy.photoEvidenceEnabled)
+                .disabled(!policy.photoEvidenceEnabled)
+
+                PrimaryButton(
+                    title: isSaving ? "Saving" : "Save Privacy Settings",
+                    systemImage: isSaving ? "arrow.triangle.2.circlepath" : "checkmark.circle.fill"
+                ) {
+                    savePolicy()
+                }
+                .disabled(!hasChanges || isSaving)
             }
             .padding(16)
             .background(Color.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -1340,19 +1403,38 @@ struct EvidencePrivacySettingsCard: View {
                     .stroke(Color.softGray, lineWidth: 1)
             )
         }
+        .onAppear {
+            draftPolicy = store.evidencePolicy
+        }
+        .onChange(of: store.evidencePolicy) { _, newPolicy in
+            guard !isSaving else { return }
+            draftPolicy = newPolicy
+        }
     }
 
     private func updatePolicy(_ mutation: (inout FamilyEvidencePolicy) -> Void) {
-        var policy = store.evidencePolicy
-        mutation(&policy)
-        store.updateEvidencePolicy(
-            photoEvidenceEnabled: policy.photoEvidenceEnabled,
-            defaultVerificationMode: policy.defaultVerificationMode,
-            blockPeopleInPhotos: policy.blockPeopleInPhotos,
-            evidenceRetentionMode: policy.evidenceRetentionMode,
-            deleteGraceMinutes: policy.deleteGraceMinutes,
-            deleteAfterPeriodCloseDays: policy.deleteAfterPeriodCloseDays
-        )
+        var updatedPolicy = policy
+        mutation(&updatedPolicy)
+        draftPolicy = updatedPolicy
+    }
+
+    private func savePolicy() {
+        let policy = policy
+        isSaving = true
+        Task {
+            let saved = await store.updateEvidencePolicy(
+                photoEvidenceEnabled: policy.photoEvidenceEnabled,
+                defaultVerificationMode: policy.defaultVerificationMode,
+                blockPeopleInPhotos: policy.blockPeopleInPhotos,
+                evidenceRetentionMode: policy.evidenceRetentionMode,
+                deleteGraceMinutes: policy.deleteGraceMinutes,
+                deleteAfterPeriodCloseDays: policy.deleteAfterPeriodCloseDays
+            )
+            isSaving = false
+            if saved {
+                draftPolicy = store.evidencePolicy
+            }
+        }
     }
 }
 
@@ -1483,7 +1565,9 @@ struct ParentInviteCard: View {
                     }
 
                     Button {
-                        store.revokeParentInvite(invite)
+                        Task {
+                            await store.revokeParentInvite(invite)
+                        }
                     } label: {
                         Image(systemName: "xmark")
                             .font(.headline.weight(.bold))
@@ -1491,6 +1575,7 @@ struct ParentInviteCard: View {
                             .foregroundStyle(Color.inkBlack)
                             .background(Color.softGray, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
+                    .disabled(store.isMutationInFlight)
                     .accessibilityLabel("Revoke parent invite")
                 }
 
@@ -1587,7 +1672,9 @@ struct ChildInviteCard: View {
                     }
 
                     Button {
-                        store.revokeInvite(invite)
+                        Task {
+                            await store.revokeInvite(invite)
+                        }
                     } label: {
                         Image(systemName: "xmark")
                             .font(.headline.weight(.bold))
@@ -1595,6 +1682,7 @@ struct ChildInviteCard: View {
                             .foregroundStyle(Color.inkBlack)
                             .background(Color.softGray, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
+                    .disabled(store.isMutationInFlight)
                     .accessibilityLabel("Revoke invite")
                 }
 
@@ -1652,6 +1740,8 @@ struct EditChoreSheet: View {
     @State private var verificationMode: VerificationMode
     @State private var blockPeopleInPhotos: Bool
     @State private var isShowingArchiveConfirmation = false
+    @State private var isSaving = false
+    @State private var draftChoreId: UUID
 
     init(chore: ChoreDefinition?) {
         self.chore = chore
@@ -1666,6 +1756,7 @@ struct EditChoreSheet: View {
         _oneTimeDate = State(initialValue: chore?.recurrence.oneTimeDate ?? Date())
         _verificationMode = State(initialValue: chore?.verificationMode ?? .photoOptional)
         _blockPeopleInPhotos = State(initialValue: chore?.blockPeopleInPhotos ?? true)
+        _draftChoreId = State(initialValue: chore?.id ?? UUID())
     }
 
     var body: some View {
@@ -1712,14 +1803,21 @@ struct EditChoreSheet: View {
                 if let chore {
                     Section {
                         Button {
-                            store.setChorePaused(chore, isPaused: !chore.isPaused)
-                            dismiss()
+                            isSaving = true
+                            Task {
+                                let saved = await store.setChorePaused(chore, isPaused: !chore.isPaused)
+                                isSaving = false
+                                if saved {
+                                    dismiss()
+                                }
+                            }
                         } label: {
                             Label(
                                 chore.isPaused ? "Resume Chore" : "Pause Chore",
                                 systemImage: chore.isPaused ? "play.fill" : "pause.fill"
                             )
                         }
+                        .disabled(isSaving)
 
                         Button(role: .destructive) {
                             isShowingArchiveConfirmation = true
@@ -1740,6 +1838,12 @@ struct EditChoreSheet: View {
                             .foregroundStyle(Color.warmOrange)
                     }
                 }
+
+                if isSaving {
+                    Section {
+                        ProgressView(store.activeMutationTitle ?? "Saving chore...")
+                    }
+                }
             }
             .navigationTitle(chore == nil ? "Add Chore" : "Edit Chore")
             .toolbar {
@@ -1750,43 +1854,9 @@ struct EditChoreSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        guard let cents = Money.cents(fromDollarString: deduction),
-                              !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                            return
-                        }
-
-                        let dueTimeLabel = Self.dueTimeFormatter.string(from: dueTime)
-                        let recurrence = selectedRecurrence
-
-                        if let chore {
-                            store.updateChore(
-                                chore,
-                                title: title,
-                                description: description,
-                                instructions: instructions,
-                                expectedEvidence: expectedEvidence,
-                                deductionCents: cents,
-                                dueTime: dueTimeLabel,
-                                recurrence: recurrence,
-                                verificationMode: verificationMode,
-                                blockPeopleInPhotos: blockPeopleInPhotos
-                            )
-                        } else {
-                            store.addChore(
-                                title: title,
-                                description: description,
-                                instructions: instructions,
-                                expectedEvidence: expectedEvidence,
-                                deductionCents: cents,
-                                dueTime: dueTimeLabel,
-                                recurrence: recurrence,
-                                verificationMode: verificationMode,
-                                blockPeopleInPhotos: blockPeopleInPhotos
-                            )
-                        }
-                        dismiss()
+                        saveChore()
                     }
-                    .disabled(saveDisabled)
+                    .disabled(saveDisabled || isSaving)
                 }
             }
             .confirmationDialog(
@@ -1796,12 +1866,64 @@ struct EditChoreSheet: View {
             ) {
                 Button("Archive Chore", role: .destructive) {
                     guard let chore else { return }
-                    store.archiveChore(chore)
-                    dismiss()
+                    isSaving = true
+                    Task {
+                        let saved = await store.archiveChore(chore)
+                        isSaving = false
+                        if saved {
+                            dismiss()
+                        }
+                    }
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text("Its completed history stays in allowance records, but it will no longer be scheduled.")
+            }
+        }
+    }
+
+    private func saveChore() {
+        guard let cents = Money.cents(fromDollarString: deduction),
+              !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+
+        let dueTimeLabel = Self.dueTimeFormatter.string(from: dueTime)
+        let recurrence = selectedRecurrence
+        isSaving = true
+
+        Task {
+            let saved: Bool
+            if let chore {
+                saved = await store.updateChore(
+                    chore,
+                    title: title,
+                    description: description,
+                    instructions: instructions,
+                    expectedEvidence: expectedEvidence,
+                    deductionCents: cents,
+                    dueTime: dueTimeLabel,
+                    recurrence: recurrence,
+                    verificationMode: verificationMode,
+                    blockPeopleInPhotos: blockPeopleInPhotos
+                )
+            } else {
+                saved = await store.addChore(
+                    id: draftChoreId,
+                    title: title,
+                    description: description,
+                    instructions: instructions,
+                    expectedEvidence: expectedEvidence,
+                    deductionCents: cents,
+                    dueTime: dueTimeLabel,
+                    recurrence: recurrence,
+                    verificationMode: verificationMode,
+                    blockPeopleInPhotos: blockPeopleInPhotos
+                )
+            }
+            isSaving = false
+            if saved {
+                dismiss()
             }
         }
     }

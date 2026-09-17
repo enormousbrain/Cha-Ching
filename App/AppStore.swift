@@ -31,6 +31,8 @@ final class AppStore: ObservableObject {
     @Published var evidencePolicy: FamilyEvidencePolicy
     @Published var notificationState: NotificationState
     @Published var familySyncState: FamilySyncState
+    @Published var mutationFailure: MutationFailure?
+    @Published private(set) var activeMutationTitle: String?
 
     private let inviteAcceptanceService: InviteAcceptanceServicing
     private let remoteStore: SupabaseRemoteStore
@@ -85,6 +87,8 @@ final class AppStore: ObservableObject {
         }
         self.notificationState = .idle
         self.familySyncState = .localPreview
+        self.mutationFailure = nil
+        self.activeMutationTitle = nil
         publishWidgetSnapshot()
     }
 
@@ -98,6 +102,10 @@ final class AppStore: ObservableObject {
 
     var isChildSession: Bool {
         activeRole == .child
+    }
+
+    var isMutationInFlight: Bool {
+        activeMutationTitle != nil
     }
 
     var activeChildProfile: ChildProfile? {
@@ -437,19 +445,27 @@ final class AppStore: ObservableObject {
         }
     }
 
-    func createChildInvite(childName: String, phoneNumber: String?) async {
+    func createChildInvite(
+        id inviteId: UUID = UUID(),
+        childName: String,
+        phoneNumber: String?
+    ) async -> Bool {
         let trimmedName = childName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
-            return
+            inviteCreationState = .failed("Add the child's name before creating an invite.")
+            return failMutation(actionTitle: "Create child invite", message: "Add the child's name before creating an invite.")
         }
 
         let normalizedPhone = phoneNumber?.trimmingCharacters(in: .whitespacesAndNewlines)
         let usablePhone = normalizedPhone?.isEmpty == false ? normalizedPhone : nil
-        let childProfileId = upsertChildProfile(named: trimmedName, phoneNumber: usablePhone)
-        let token = makeInviteToken(for: trimmedName, prefix: "child")
+        let childProfileId = childProfiles.first {
+            $0.displayName.caseInsensitiveCompare(trimmedName) == .orderedSame
+        }?.id ?? inviteId
+        let token = makeInviteToken(for: trimmedName, prefix: "child", nonce: inviteId)
         let now = Date()
         let expiresAt = Calendar.current.date(byAdding: .day, value: 7, to: now) ?? now.addingTimeInterval(7 * 24 * 60 * 60)
         let invite = ChildInvite(
+            id: inviteId,
             familyId: familyId,
             childProfileId: childProfileId,
             childName: trimmedName,
@@ -462,48 +478,74 @@ final class AppStore: ObservableObject {
         )
 
         inviteCreationState = .creating
-        childInvites.insert(invite, at: 0)
-
-        do {
-            let profileRecord = try await remoteStore.upsertChildProfile(
-                id: childProfileId,
-                familyId: familyId,
-                displayName: trimmedName,
-                phoneNumber: usablePhone,
-                createdByParentId: nil
-            )
-            applyChildProfileRecord(profileRecord)
-
-            let inviteRecord = try await remoteStore.createChildInvite(
-                id: invite.id,
-                familyId: familyId,
-                childProfileId: childProfileId,
-                childName: trimmedName,
-                phoneNumber: usablePhone,
-                createdByParentId: nil,
-                token: token,
-                expiresAt: expiresAt
-            )
-            applyChildInviteRecord(inviteRecord, token: token)
-            inviteCreationState = .synced("Child invite synced with Supabase.")
-        } catch {
-            inviteCreationState = .localOnly("Invite is ready to share here. Supabase sync needs parent sign-in.")
-            debugPrint("Child invite sync failed:", error.localizedDescription)
+        let mode = mutationPersistenceMode
+        var profileRecord: ChildProfileRecord?
+        var inviteRecord: ChildInviteRecord?
+        let saved = await commitMutation(
+            actionTitle: "Create child invite",
+            successMessage: "Child invite saved across devices.",
+            remoteSave: {
+                profileRecord = try await remoteStore.upsertChildProfile(
+                    id: childProfileId,
+                    familyId: familyId,
+                    displayName: trimmedName,
+                    phoneNumber: usablePhone,
+                    createdByParentId: nil
+                )
+                inviteRecord = try await remoteStore.createChildInvite(
+                    id: invite.id,
+                    familyId: familyId,
+                    childProfileId: childProfileId,
+                    childName: trimmedName,
+                    phoneNumber: usablePhone,
+                    createdByParentId: nil,
+                    token: token,
+                    expiresAt: expiresAt
+                )
+            },
+            localCommit: {
+                if let profileRecord, let inviteRecord {
+                    applyChildProfileRecord(profileRecord)
+                    applyChildInviteRecord(inviteRecord, token: token)
+                } else {
+                    upsertLocalChildProfile(
+                        id: childProfileId,
+                        childName: trimmedName,
+                        phoneNumber: usablePhone,
+                        updatedAt: now
+                    )
+                    childInvites.insert(invite, at: 0)
+                }
+            }
+        )
+        if saved {
+            inviteCreationState = mode == .remoteRequired
+                ? .synced("Child invite synced with Supabase.")
+                : .localOnly("Preview invite is ready to share from this phone.")
+        } else {
+            inviteCreationState = .failed(mutationFailure?.message ?? "The child invite was not created. Try again.")
         }
+        return saved
     }
 
-    func createParentInvite(parentName: String, phoneNumber: String?) async {
+    func createParentInvite(
+        id inviteId: UUID = UUID(),
+        parentName: String,
+        phoneNumber: String?
+    ) async -> Bool {
         let trimmedName = parentName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
-            return
+            inviteCreationState = .failed("Add the parent's name before creating an invite.")
+            return failMutation(actionTitle: "Create parent invite", message: "Add the parent's name before creating an invite.")
         }
 
         let normalizedPhone = phoneNumber?.trimmingCharacters(in: .whitespacesAndNewlines)
         let usablePhone = normalizedPhone?.isEmpty == false ? normalizedPhone : nil
-        let token = makeInviteToken(for: trimmedName, prefix: "parent")
+        let token = makeInviteToken(for: trimmedName, prefix: "parent", nonce: inviteId)
         let now = Date()
         let expiresAt = Calendar.current.date(byAdding: .day, value: 7, to: now) ?? now.addingTimeInterval(7 * 24 * 60 * 60)
         let invite = ParentInvite(
+            id: inviteId,
             familyId: familyId,
             parentName: trimmedName,
             phoneNumber: usablePhone,
@@ -515,36 +557,68 @@ final class AppStore: ObservableObject {
         )
 
         inviteCreationState = .creating
-        parentInvites.insert(invite, at: 0)
-
-        do {
-            let inviteRecord = try await remoteStore.createParentInvite(
-                id: invite.id,
-                familyId: familyId,
-                parentName: trimmedName,
-                phoneNumber: usablePhone,
-                createdByParentId: nil,
-                token: token,
-                expiresAt: expiresAt
-            )
-            applyParentInviteRecord(inviteRecord, token: token)
-            inviteCreationState = .synced("Parent invite synced with Supabase.")
-        } catch {
-            inviteCreationState = .localOnly("Invite is ready to share here. Supabase sync needs parent sign-in.")
-            debugPrint("Parent invite sync failed:", error.localizedDescription)
+        let mode = mutationPersistenceMode
+        var inviteRecord: ParentInviteRecord?
+        let saved = await commitMutation(
+            actionTitle: "Create parent invite",
+            successMessage: "Parent invite saved across devices.",
+            remoteSave: {
+                inviteRecord = try await remoteStore.createParentInvite(
+                    id: invite.id,
+                    familyId: familyId,
+                    parentName: trimmedName,
+                    phoneNumber: usablePhone,
+                    createdByParentId: nil,
+                    token: token,
+                    expiresAt: expiresAt
+                )
+            },
+            localCommit: {
+                if let inviteRecord {
+                    applyParentInviteRecord(inviteRecord, token: token)
+                } else {
+                    parentInvites.insert(invite, at: 0)
+                }
+            }
+        )
+        if saved {
+            inviteCreationState = mode == .remoteRequired
+                ? .synced("Parent invite synced with Supabase.")
+                : .localOnly("Preview invite is ready to share from this phone.")
+        } else {
+            inviteCreationState = .failed(mutationFailure?.message ?? "The parent invite was not created. Try again.")
         }
+        return saved
     }
 
-    func revokeInvite(_ invite: ChildInvite) {
-        updateInvite(invite.id) { invite in
-            invite.status = .revoked
-        }
+    func revokeInvite(_ invite: ChildInvite) async -> Bool {
+        await commitMutation(
+            actionTitle: "Revoke invite",
+            successMessage: "Child invite revoked across devices.",
+            remoteSave: {
+                _ = try await remoteStore.revokeChildInvite(id: invite.id)
+            },
+            localCommit: {
+                updateInvite(invite.id) { invite in
+                    invite.status = .revoked
+                }
+            }
+        )
     }
 
-    func revokeParentInvite(_ invite: ParentInvite) {
-        updateParentInvite(invite.id) { invite in
-            invite.status = .revoked
-        }
+    func revokeParentInvite(_ invite: ParentInvite) async -> Bool {
+        await commitMutation(
+            actionTitle: "Revoke invite",
+            successMessage: "Parent invite revoked across devices.",
+            remoteSave: {
+                _ = try await remoteStore.revokeParentInvite(id: invite.id)
+            },
+            localCommit: {
+                updateParentInvite(invite.id) { invite in
+                    invite.status = .revoked
+                }
+            }
+        )
     }
 
     func markInviteAccepted(_ invite: ChildInvite) {
@@ -782,59 +856,40 @@ final class AppStore: ObservableObject {
         publishWidgetSnapshot()
     }
 
-    func approve(_ occurrence: TaskOccurrence) {
-        updateOccurrence(occurrence.id) { task in
-            task.status = .approved
-            task.updatedAt = Date()
-        }
-        decideSubmission(for: occurrence, decision: .approved)
-        ledger = AllowanceEngine.voidingDeduction(in: ledger, for: occurrence.id)
-        publishWidgetSnapshot()
-        queueRemoteParentDecision(for: occurrence.id, decision: .approved)
+    func approve(_ occurrence: TaskOccurrence) async -> Bool {
+        await commitParentDecision(for: occurrence, decision: .approved)
     }
 
-    func reject(_ occurrence: TaskOccurrence) {
-        let chore = chore(for: occurrence)
-        updateOccurrence(occurrence.id) { task in
-            task.status = .rejected
-            task.updatedAt = Date()
-        }
-        decideSubmission(for: occurrence, decision: .rejected)
-        addDeductionIfNeeded(for: occurrence, chore: chore)
-        publishWidgetSnapshot()
-        queueRemoteParentDecision(for: occurrence.id, decision: .rejected)
+    func reject(_ occurrence: TaskOccurrence) async -> Bool {
+        await commitParentDecision(for: occurrence, decision: .rejected)
     }
 
-    func excuse(_ occurrence: TaskOccurrence, reason: String? = nil) {
-        updateOccurrence(occurrence.id) { task in
-            task.status = .excused
-            task.excuseReason = reason
-            task.updatedAt = Date()
-        }
-        decideSubmission(for: occurrence, decision: .excused, note: reason)
-        ledger = AllowanceEngine.voidingDeduction(in: ledger, for: occurrence.id)
-        publishWidgetSnapshot()
-        queueRemoteParentDecision(for: occurrence.id, decision: .excused, note: reason)
+    func excuse(_ occurrence: TaskOccurrence, reason: String? = nil) async -> Bool {
+        await commitParentDecision(for: occurrence, decision: .excused, note: reason)
     }
 
-    func requestRetake(_ occurrence: TaskOccurrence) {
+    func requestRetake(_ occurrence: TaskOccurrence) async -> Bool {
         let note = "Please send one clearer photo."
-        updateOccurrence(occurrence.id) { task in
-            task.status = .due
-            task.updatedAt = Date()
-        }
-        decideSubmission(for: occurrence, decision: .retakeRequested, note: note)
-        publishWidgetSnapshot()
-        queueRemoteParentDecision(for: occurrence.id, decision: .retakeRequested, note: note)
+        return await commitParentDecision(for: occurrence, decision: .retakeRequested, note: note)
     }
 
-    func requestExcuse(_ occurrence: TaskOccurrence) {
-        updateOccurrence(occurrence.id) { task in
-            task.status = .submitted
-            task.excuseReason = "Child asked for a parent check."
-            task.updatedAt = Date()
-        }
-        publishWidgetSnapshot()
+    func requestExcuse(_ occurrence: TaskOccurrence) async -> Bool {
+        let reason = "Child asked for a parent check."
+        return await commitMutation(
+            actionTitle: "Request parent review",
+            successMessage: "Parent review requested across devices.",
+            remoteSave: {
+                _ = try await remoteStore.requestChoreExcuse(occurrenceId: occurrence.id, reason: reason)
+            },
+            localCommit: {
+                updateOccurrence(occurrence.id) { task in
+                    task.status = .submitted
+                    task.excuseReason = reason
+                    task.updatedAt = Date()
+                }
+                publishWidgetSnapshot()
+            }
+        )
     }
 
     func sendNudge(for occurrence: TaskOccurrence) async {
@@ -866,20 +921,40 @@ final class AppStore: ObservableObject {
         }
     }
 
-    func addBonus(title: String, amountCents: Int, note: String?) {
+    func addBonus(
+        id: UUID = UUID(),
+        title: String,
+        amountCents: Int,
+        note: String?
+    ) async -> Bool {
         let entry = LedgerEntry(
+            id: id,
             weekId: weekId,
             type: .bonus,
             title: title,
             amountCents: amountCents,
             note: note
         )
-        ledger.append(entry)
-        publishWidgetSnapshot()
-
-        Task {
-            await syncBonusEntry(entry)
-        }
+        return await commitMutation(
+            actionTitle: "Add bonus",
+            successMessage: "Bonus saved across devices.",
+            remoteSave: {
+                _ = try await remoteStore.createBonusLedgerEntry(
+                    id: entry.id,
+                    weekId: entry.weekId,
+                    childId: childId,
+                    createdBy: session.userId,
+                    title: entry.title,
+                    amountCents: entry.amountCents,
+                    note: entry.note,
+                    createdAt: entry.createdAt
+                )
+            },
+            localCommit: {
+                ledger.append(entry)
+                publishWidgetSnapshot()
+            }
+        )
     }
 
     func updateAllowanceSettings(
@@ -887,7 +962,7 @@ final class AppStore: ObservableObject {
         allowanceWeekday: AllowanceWeekday,
         nextAllowanceDate: Date,
         baseAllowanceCents: Int? = nil
-    ) {
+    ) async -> Bool {
         let updatedSettings = AllowanceSettings(
             familyId: familyId,
             baseAllowanceCents: max(0, baseAllowanceCents ?? allowanceSettings.baseAllowanceCents),
@@ -895,14 +970,25 @@ final class AppStore: ObservableObject {
             allowanceWeekday: allowanceWeekday,
             nextAllowanceDate: Calendar.current.startOfDay(for: nextAllowanceDate)
         )
-        allowanceSettings = updatedSettings
-        saveAllowanceSettings()
-        publishWidgetSnapshot()
-
-        Task {
-            await syncAllowanceSettings(updatedSettings)
+        let saved = await commitMutation(
+            actionTitle: "Save allowance schedule",
+            successMessage: "Allowance settings saved across devices.",
+            remoteSave: {
+                _ = try await remoteStore.updateFamilyAllowanceSettings(
+                    familyId: updatedSettings.familyId,
+                    settings: updatedSettings
+                )
+            },
+            localCommit: {
+                allowanceSettings = updatedSettings
+                saveAllowanceSettings()
+                publishWidgetSnapshot()
+            }
+        )
+        if saved {
             await refreshNotificationScheduleIfAuthorized()
         }
+        return saved
     }
 
     func updateEvidencePolicy(
@@ -912,7 +998,7 @@ final class AppStore: ObservableObject {
         evidenceRetentionMode: EvidenceRetentionMode,
         deleteGraceMinutes: Int,
         deleteAfterPeriodCloseDays: Int
-    ) {
+    ) async -> Bool {
         let updatedPolicy = FamilyEvidencePolicy(
             familyId: familyId,
             photoEvidenceEnabled: photoEvidenceEnabled,
@@ -922,11 +1008,16 @@ final class AppStore: ObservableObject {
             deleteGraceMinutes: deleteGraceMinutes,
             deleteAfterPeriodCloseDays: deleteAfterPeriodCloseDays
         )
-        evidencePolicy = updatedPolicy
-
-        Task {
-            await syncEvidencePolicy(updatedPolicy)
-        }
+        return await commitMutation(
+            actionTitle: "Save evidence settings",
+            successMessage: "Evidence settings saved across devices.",
+            remoteSave: {
+                _ = try await remoteStore.upsertFamilyEvidencePolicy(updatedPolicy)
+            },
+            localCommit: {
+                evidencePolicy = updatedPolicy
+            }
+        )
     }
 
     func allowsPhotoEvidence(for chore: ChoreDefinition) -> Bool {
@@ -1201,6 +1292,7 @@ final class AppStore: ObservableObject {
     }
 
     func addChore(
+        id: UUID = UUID(),
         title: String,
         description: String,
         instructions: String,
@@ -1210,21 +1302,20 @@ final class AppStore: ObservableObject {
         recurrence: ChoreRecurrence,
         verificationMode: VerificationMode,
         blockPeopleInPhotos: Bool
-    ) {
+    ) async -> Bool {
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedDueTime = dueTime.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedTitle.isEmpty else {
-            familySyncState = .failed("Add a chore title.")
-            return
+            return failMutation(actionTitle: "Save chore", message: "Add a chore title.")
         }
         guard let dueAt = Self.dateToday(for: trimmedDueTime) else {
-            familySyncState = .failed("Use a due time like 8:00 PM.")
-            return
+            return failMutation(actionTitle: "Save chore", message: "Use a due time like 8:00 PM.")
         }
 
         let now = Date()
         let dueWindowMinutes = 90
         let chore = ChoreDefinition(
+            id: id,
             familyId: familyId,
             childId: childId,
             title: trimmedTitle,
@@ -1240,6 +1331,7 @@ final class AppStore: ObservableObject {
             dueWindowMinutes: dueWindowMinutes
         )
         let occurrence: TaskOccurrence? = recurrence.occurs(on: now) ? TaskOccurrence(
+            id: chore.id,
             choreDefinitionId: chore.id,
             childId: childId,
             weekId: weekId,
@@ -1251,17 +1343,28 @@ final class AppStore: ObservableObject {
             updatedAt: now
         ) : nil
 
-        chores.append(chore)
-        chores.sort { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
-        if let occurrence {
-            occurrences.append(occurrence)
-        }
-        publishWidgetSnapshot()
-
-        Task {
-            await syncCreatedChore(chore, occurrence: occurrence)
+        let saved = await commitMutation(
+            actionTitle: "Save chore",
+            successMessage: "Chore saved across devices.",
+            remoteSave: {
+                _ = try await remoteStore.createChore(chore)
+                if let occurrence {
+                    _ = try await remoteStore.createTaskOccurrence(occurrence)
+                }
+            },
+            localCommit: {
+                chores.append(chore)
+                chores.sort { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+                if let occurrence {
+                    occurrences.append(occurrence)
+                }
+                publishWidgetSnapshot()
+            }
+        )
+        if saved {
             await refreshNotificationScheduleIfAuthorized()
         }
+        return saved
     }
 
     func updateChore(
@@ -1275,19 +1378,17 @@ final class AppStore: ObservableObject {
         recurrence: ChoreRecurrence,
         verificationMode: VerificationMode,
         blockPeopleInPhotos: Bool
-    ) {
+    ) async -> Bool {
         guard let index = chores.firstIndex(where: { $0.id == chore.id }) else {
-            return
+            return failMutation(actionTitle: "Save chore", message: "This chore is no longer available. Refresh and try again.")
         }
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedDueTime = dueTime.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedTitle.isEmpty else {
-            familySyncState = .failed("Add a chore title.")
-            return
+            return failMutation(actionTitle: "Save chore", message: "Add a chore title.")
         }
         guard Self.dateToday(for: trimmedDueTime) != nil else {
-            familySyncState = .failed("Use a due time like 8:00 PM.")
-            return
+            return failMutation(actionTitle: "Save chore", message: "Use a due time like 8:00 PM.")
         }
 
         let choreId = chore.id
@@ -1302,86 +1403,127 @@ final class AppStore: ObservableObject {
             recurrence: recurrence
         )
 
-        chores[index].title = trimmedTitle
-        chores[index].shortTitle = shortTitle
-        chores[index].description = trimmedDescription
-        chores[index].instructions = trimmedInstructions
-        chores[index].expectedEvidence = trimmedExpectedEvidence
-        chores[index].deductionCents = max(0, deductionCents)
-        chores[index].recurrence = recurrence
-        chores[index].dueTime = trimmedDueTime
-        chores[index].verificationMode = verificationMode
-        chores[index].blockPeopleInPhotos = blockPeopleInPhotos
-        chores[index].updatedAt = Date()
+        var updatedChore = chores[index]
+        updatedChore.title = trimmedTitle
+        updatedChore.shortTitle = shortTitle
+        updatedChore.description = trimmedDescription
+        updatedChore.instructions = trimmedInstructions
+        updatedChore.expectedEvidence = trimmedExpectedEvidence
+        updatedChore.deductionCents = max(0, deductionCents)
+        updatedChore.recurrence = recurrence
+        updatedChore.dueTime = trimmedDueTime
+        updatedChore.verificationMode = verificationMode
+        updatedChore.blockPeopleInPhotos = blockPeopleInPhotos
+        updatedChore.updatedAt = Date()
 
-        for update in occurrenceUpdates {
-            updateOccurrence(update.id) { task in
-                task.scheduledAt = update.scheduledAt
-                task.dueAt = update.dueAt
-                task.expiresAt = update.expiresAt
-                if task.status == .upcoming || task.status == .due {
-                    task.status = update.dueAt <= Date() ? .due : .upcoming
+        let saved = await commitMutation(
+            actionTitle: "Save chore",
+            successMessage: "Chore saved across devices.",
+            remoteSave: {
+                _ = try await remoteStore.updateChore(
+                    id: choreId,
+                    title: trimmedTitle,
+                    shortTitle: shortTitle,
+                    description: trimmedDescription,
+                    instructions: trimmedInstructions,
+                    expectedEvidence: trimmedExpectedEvidence,
+                    deductionCents: max(0, deductionCents),
+                    dueTime: trimmedDueTime,
+                    recurrence: recurrence,
+                    verificationMode: verificationMode,
+                    blockPeopleInPhotos: blockPeopleInPhotos
+                )
+                for update in occurrenceUpdates {
+                    _ = try await remoteStore.updateOccurrenceTiming(
+                        id: update.id,
+                        scheduledAt: update.scheduledAt,
+                        dueAt: update.dueAt,
+                        expiresAt: update.expiresAt
+                    )
                 }
-                task.updatedAt = Date()
+            },
+            localCommit: {
+                chores[index] = updatedChore
+                for update in occurrenceUpdates {
+                    updateOccurrence(update.id) { task in
+                        task.scheduledAt = update.scheduledAt
+                        task.dueAt = update.dueAt
+                        task.expiresAt = update.expiresAt
+                        if task.status == .upcoming || task.status == .due {
+                            task.status = update.dueAt <= Date() ? .due : .upcoming
+                        }
+                        task.updatedAt = Date()
+                    }
+                }
+                publishWidgetSnapshot()
             }
-        }
-
-        publishWidgetSnapshot()
-
-        Task {
-            await syncChore(
-                id: choreId,
-                title: trimmedTitle,
-                shortTitle: shortTitle,
-                description: trimmedDescription,
-                instructions: trimmedInstructions,
-                expectedEvidence: trimmedExpectedEvidence,
-                deductionCents: max(0, deductionCents),
-                dueTime: trimmedDueTime,
-                recurrence: recurrence,
-                verificationMode: verificationMode,
-                blockPeopleInPhotos: blockPeopleInPhotos,
-                occurrenceUpdates: occurrenceUpdates
-            )
+        )
+        if saved {
             await refreshNotificationScheduleIfAuthorized()
         }
+        return saved
     }
 
-    func setChorePaused(_ chore: ChoreDefinition, isPaused: Bool) {
+    func setChorePaused(_ chore: ChoreDefinition, isPaused: Bool) async -> Bool {
         guard let index = chores.firstIndex(where: { $0.id == chore.id }),
               chores[index].archivedAt == nil else {
-            return
+            return failMutation(actionTitle: "Change chore status", message: "This chore is no longer available. Refresh and try again.")
         }
 
-        chores[index].isPaused = isPaused
-        chores[index].updatedAt = Date()
-        if isPaused {
-            excuseOpenOccurrences(for: chore.id, reason: "Paused by parent.")
-        }
-        publishWidgetSnapshot()
-
-        Task {
-            await syncChoreLifecycle(id: chore.id, isPaused: isPaused, archive: false)
+        let saved = await commitMutation(
+            actionTitle: isPaused ? "Pause chore" : "Resume chore",
+            successMessage: isPaused ? "Chore paused across devices." : "Chore resumed across devices.",
+            remoteSave: {
+                _ = try await remoteStore.setChoreLifecycle(
+                    id: chore.id,
+                    isPaused: isPaused,
+                    archive: false
+                )
+            },
+            localCommit: {
+                chores[index].isPaused = isPaused
+                chores[index].updatedAt = Date()
+                if isPaused {
+                    excuseOpenOccurrences(for: chore.id, reason: "Paused by parent.")
+                }
+                publishWidgetSnapshot()
+            }
+        )
+        if saved {
             await refreshNotificationScheduleIfAuthorized()
         }
+        return saved
     }
 
-    func archiveChore(_ chore: ChoreDefinition) {
+    func archiveChore(_ chore: ChoreDefinition) async -> Bool {
         guard let index = chores.firstIndex(where: { $0.id == chore.id }),
               chores[index].archivedAt == nil else {
-            return
+            return failMutation(actionTitle: "Archive chore", message: "This chore is no longer available. Refresh and try again.")
         }
 
-        chores[index].isPaused = true
-        chores[index].archivedAt = Date()
-        chores[index].updatedAt = Date()
-        excuseOpenOccurrences(for: chore.id, reason: "Archived by parent.")
-        publishWidgetSnapshot()
-
-        Task {
-            await syncChoreLifecycle(id: chore.id, isPaused: true, archive: true)
+        let archivedAt = Date()
+        let saved = await commitMutation(
+            actionTitle: "Archive chore",
+            successMessage: "Chore archived across devices.",
+            remoteSave: {
+                _ = try await remoteStore.setChoreLifecycle(
+                    id: chore.id,
+                    isPaused: true,
+                    archive: true
+                )
+            },
+            localCommit: {
+                chores[index].isPaused = true
+                chores[index].archivedAt = archivedAt
+                chores[index].updatedAt = archivedAt
+                excuseOpenOccurrences(for: chore.id, reason: "Archived by parent.")
+                publishWidgetSnapshot()
+            }
+        )
+        if saved {
             await refreshNotificationScheduleIfAuthorized()
         }
+        return saved
     }
 
     private func applyLocalPreviewState() {
@@ -1911,29 +2053,37 @@ final class AppStore: ObservableObject {
         )
     }
 
-    private func upsertChildProfile(named childName: String, phoneNumber: String?) -> UUID {
-        if let index = childProfiles.firstIndex(where: { $0.displayName.caseInsensitiveCompare(childName) == .orderedSame }) {
+    private func upsertLocalChildProfile(
+        id: UUID,
+        childName: String,
+        phoneNumber: String?,
+        updatedAt: Date
+    ) {
+        if let index = childProfiles.firstIndex(where: { $0.id == id }) {
+            childProfiles[index].displayName = childName
             childProfiles[index].phoneNumber = phoneNumber
-            childProfiles[index].updatedAt = Date()
-            return childProfiles[index].id
+            childProfiles[index].updatedAt = updatedAt
+            return
         }
 
         let profile = ChildProfile(
+            id: id,
             familyId: familyId,
             displayName: childName,
             phoneNumber: phoneNumber,
-            createdByParentId: parentId
+            createdByParentId: parentId,
+            createdAt: updatedAt,
+            updatedAt: updatedAt
         )
         childProfiles.append(profile)
-        return profile.id
     }
 
-    private func makeInviteToken(for inviteeName: String, prefix: String) -> String {
+    private func makeInviteToken(for inviteeName: String, prefix: String, nonce: UUID) -> String {
         let namePrefix = inviteeName
             .lowercased()
             .filter { $0.isLetter || $0.isNumber }
             .prefix(12)
-        return "\(prefix)-\(namePrefix)-\(UUID().uuidString.lowercased())"
+        return "\(prefix)-\(namePrefix)-\(nonce.uuidString.lowercased())"
     }
 
     private func inviteToken(from url: URL) -> String? {
@@ -2090,172 +2240,111 @@ final class AppStore: ObservableObject {
         )
     }
 
-    private func syncAllowanceSettings(_ settings: AllowanceSettings) async {
-        guard SupabaseClientProvider.shared.auth.currentSession != nil else {
-            return
-        }
-
-        do {
-            _ = try await remoteStore.currentSession()
-            _ = try await remoteStore.updateFamilyAllowanceSettings(
-                familyId: settings.familyId,
-                settings: settings
-            )
-            familySyncState = .synced("Allowance settings saved across devices.")
-        } catch {
-            familySyncState = .failed("Allowance schedule saved on this phone, but did not sync: \(error.localizedDescription)")
-        }
+    private var mutationPersistenceMode: MutationPersistenceMode {
+        SupabaseClientProvider.shared.auth.currentSession == nil ? .localPreview : .remoteRequired
     }
 
-    private func syncEvidencePolicy(_ policy: FamilyEvidencePolicy) async {
-        guard SupabaseClientProvider.shared.auth.currentSession != nil else {
-            return
+    @discardableResult
+    private func commitMutation(
+        actionTitle: String,
+        successMessage: String,
+        remoteSave: () async throws -> Void,
+        localCommit: () -> Void
+    ) async -> Bool {
+        guard activeMutationTitle == nil else {
+            return false
         }
+
+        let mode = mutationPersistenceMode
+        mutationFailure = nil
+        activeMutationTitle = actionTitle
 
         do {
-            _ = try await remoteStore.currentSession()
-            _ = try await remoteStore.upsertFamilyEvidencePolicy(policy)
-        } catch {
-            familySyncState = .failed("Evidence settings saved on this phone, but did not sync: \(error.localizedDescription)")
-        }
-    }
-
-    private func syncChore(
-        id: UUID,
-        title: String,
-        shortTitle: String,
-        description: String,
-        instructions: String,
-        expectedEvidence: String,
-        deductionCents: Int,
-        dueTime: String,
-        recurrence: ChoreRecurrence,
-        verificationMode: VerificationMode,
-        blockPeopleInPhotos: Bool,
-        occurrenceUpdates: [OccurrenceTimeUpdate]
-    ) async {
-        guard SupabaseClientProvider.shared.auth.currentSession != nil else {
-            return
-        }
-
-        do {
-            _ = try await remoteStore.currentSession()
-            _ = try await remoteStore.updateChore(
-                id: id,
-                title: title,
-                shortTitle: shortTitle,
-                description: description,
-                instructions: instructions,
-                expectedEvidence: expectedEvidence,
-                deductionCents: deductionCents,
-                dueTime: dueTime,
-                recurrence: recurrence,
-                verificationMode: verificationMode,
-                blockPeopleInPhotos: blockPeopleInPhotos
+            try await MutationCommitter.commit(
+                mode: mode,
+                remoteSave: {
+                    _ = try await remoteStore.currentSession()
+                    try await remoteSave()
+                },
+                localCommit: localCommit
             )
-            for update in occurrenceUpdates {
-                _ = try await remoteStore.updateOccurrenceTiming(
-                    id: update.id,
-                    scheduledAt: update.scheduledAt,
-                    dueAt: update.dueAt,
-                    expiresAt: update.expiresAt
-                )
+            activeMutationTitle = nil
+            if mode == .remoteRequired {
+                familySyncState = .synced(successMessage)
             }
+            return true
         } catch {
-            familySyncState = .failed("Chore saved on this phone, but did not sync: \(error.localizedDescription)")
+            activeMutationTitle = nil
+            let message = "Your current data was kept. Check the connection and try again. \(error.localizedDescription)"
+            mutationFailure = MutationFailure(title: "Couldn't \(actionTitle.lowercased())", message: message)
+            familySyncState = .failed(message)
+            return false
         }
     }
 
-    private func syncCreatedChore(_ chore: ChoreDefinition, occurrence: TaskOccurrence?) async {
-        guard SupabaseClientProvider.shared.auth.currentSession != nil else {
-            return
-        }
-
-        do {
-            _ = try await remoteStore.currentSession()
-            _ = try await remoteStore.createChore(chore)
-            if let occurrence {
-                _ = try await remoteStore.createTaskOccurrence(occurrence)
-            }
-            familySyncState = .synced("Chore saved across devices.")
-        } catch {
-            familySyncState = .failed("Chore saved on this phone, but did not sync: \(error.localizedDescription)")
-        }
+    @discardableResult
+    private func failMutation(actionTitle: String, message: String) -> Bool {
+        mutationFailure = MutationFailure(title: "Couldn't \(actionTitle.lowercased())", message: message)
+        familySyncState = .failed(message)
+        return false
     }
 
-    private func syncChoreLifecycle(id: UUID, isPaused: Bool, archive: Bool) async {
-        guard SupabaseClientProvider.shared.auth.currentSession != nil else {
-            return
-        }
-
-        do {
-            _ = try await remoteStore.currentSession()
-            _ = try await remoteStore.setChoreLifecycle(
-                id: id,
-                isPaused: isPaused,
-                archive: archive
-            )
-            await loadRemoteFamilyStateIfSignedIn(force: true)
-            familySyncState = .synced(
-                archive ? "Chore archived across devices." : (isPaused ? "Chore paused across devices." : "Chore resumed across devices.")
-            )
-        } catch {
-            familySyncState = .failed("Chore status changed on this phone, but did not sync: \(error.localizedDescription)")
-        }
-    }
-
-    private func syncBonusEntry(_ entry: LedgerEntry) async {
-        guard SupabaseClientProvider.shared.auth.currentSession != nil else {
-            return
-        }
-
-        do {
-            _ = try await remoteStore.currentSession()
-            _ = try await remoteStore.createBonusLedgerEntry(
-                id: entry.id,
-                weekId: entry.weekId,
-                childId: childId,
-                createdBy: session.userId,
-                title: entry.title,
-                amountCents: entry.amountCents,
-                note: entry.note,
-                createdAt: entry.createdAt
-            )
-        } catch {
-            familySyncState = .failed("Bonus saved on this phone, but did not sync: \(error.localizedDescription)")
-        }
-    }
-
-    private func queueRemoteParentDecision(
-        for occurrenceId: UUID,
+    private func commitParentDecision(
+        for occurrence: TaskOccurrence,
         decision: ParentDecision.Decision,
         note: String? = nil
-    ) {
-        guard SupabaseClientProvider.shared.auth.currentSession != nil else {
-            return
-        }
-
-        Task {
-            await syncRemoteParentDecision(for: occurrenceId, decision: decision, note: note)
-        }
+    ) async -> Bool {
+        await commitMutation(
+            actionTitle: "Save review",
+            successMessage: "Review saved across devices.",
+            remoteSave: {
+                _ = try await remoteStore.decideSubmission(
+                    occurrenceId: occurrence.id,
+                    decision: decision,
+                    note: note
+                )
+            },
+            localCommit: {
+                applyParentDecisionLocally(for: occurrence, decision: decision, note: note)
+            }
+        )
     }
 
-    private func syncRemoteParentDecision(
-        for occurrenceId: UUID,
+    private func applyParentDecisionLocally(
+        for occurrence: TaskOccurrence,
         decision: ParentDecision.Decision,
         note: String?
-    ) async {
-        do {
-            _ = try await remoteStore.currentSession()
-            _ = try await remoteStore.decideSubmission(
-                occurrenceId: occurrenceId,
-                decision: decision,
-                note: note
-            )
-            await loadRemoteFamilyState()
-        } catch {
-            familySyncState = .failed("Review saved on this phone, but did not sync: \(error.localizedDescription)")
+    ) {
+        let updatedStatus: TaskOccurrenceStatus
+        switch decision {
+        case .approved:
+            updatedStatus = .approved
+        case .rejected:
+            updatedStatus = .rejected
+        case .excused:
+            updatedStatus = .excused
+        case .retakeRequested:
+            updatedStatus = .due
         }
+
+        updateOccurrence(occurrence.id) { task in
+            task.status = updatedStatus
+            if decision == .excused {
+                task.excuseReason = note
+            }
+            task.updatedAt = Date()
+        }
+        decideSubmission(for: occurrence, decision: decision, note: note)
+
+        switch decision {
+        case .approved, .excused:
+            ledger = AllowanceEngine.voidingDeduction(in: ledger, for: occurrence.id)
+        case .rejected:
+            addDeductionIfNeeded(for: occurrence, chore: chore(for: occurrence))
+        case .retakeRequested:
+            break
+        }
+        publishWidgetSnapshot()
     }
 
     private func addDeductionIfNeeded(for occurrence: TaskOccurrence, chore: ChoreDefinition) {
@@ -2362,6 +2451,12 @@ enum PendingInviteKind: Equatable {
     case parent
 }
 
+struct MutationFailure: Identifiable, Equatable {
+    let id = UUID()
+    var title: String
+    var message: String
+}
+
 enum InviteAcceptanceState: Equatable {
     case idle
     case requestingCode
@@ -2406,6 +2501,7 @@ enum InviteCreationState: Equatable {
     case creating
     case synced(String)
     case localOnly(String)
+    case failed(String)
 
     var isWorking: Bool {
         if case .creating = self {
@@ -2418,7 +2514,7 @@ enum InviteCreationState: Equatable {
         switch self {
         case .idle, .creating:
             return nil
-        case .synced(let message), .localOnly(let message):
+        case .synced(let message), .localOnly(let message), .failed(let message):
             return message
         }
     }
@@ -2431,6 +2527,8 @@ enum InviteCreationState: Equatable {
             return "checkmark.icloud.fill"
         case .localOnly:
             return "icloud.slash.fill"
+        case .failed:
+            return "exclamationmark.triangle.fill"
         }
     }
 

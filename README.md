@@ -28,7 +28,7 @@ Current display name: `ChaChing`
 - Excuse flow that voids deductions
 - Parent bonus flow
 - Parent child-profile and invite-link flow with iOS share sheet handoff
-- Supabase invite creation writes for child and parent links, with local fallback while auth is unfinished
+- Supabase invite creation writes for child and parent links, with local preview behavior before sign-in
 - Invite acceptance service that requests/verifies SMS OTP and calls the `accept-child-invite` Edge Function
 - Supabase Edge Function source for hashing invite tokens and linking authenticated child users
 - Parent invite flow for a second parent account, with `Daddy` / `Mamma` seed display names
@@ -45,6 +45,8 @@ Current display name: `ChaChing`
 - Remote family refresh on app foreground, toolbar refresh, and pull-to-refresh for parent/child state
 - Best-effort iOS background app refresh that pulls Supabase state, republishes the App Group widget snapshot, and refreshes local notification schedules
 - Supabase write-back for parent-created bonuses, chore title/deduction/time edits, and allowance amount/schedule changes
+- Remote-first authenticated mutations that update local app and widget state only after Supabase succeeds, with stable retry IDs and retained form input after failures
+- Linked-child Supabase RPC for requesting a parent excuse review without granting broader occurrence update access
 - Parent review queue actions
 - Parent chore editing
 - Supabase-backed current earnings, daily ledger activity, and archived allowance-period browsing
@@ -95,7 +97,7 @@ xcodebuild -project ChaChing.xcodeproj -scheme ChaChing \
   -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' build
 ```
 
-The current core suite contains 16 passing tests, and the app plus widget extension compile for the iOS Simulator.
+The current core suite contains 22 passing tests, and the app plus widget extension compile for the iOS Simulator.
 
 ## Supabase
 
@@ -166,6 +168,7 @@ supabase/migrations/0012_evidence_deletion_schedule.sql
 supabase/migrations/0013_retention_cleanup.sql
 supabase/migrations/0014_submission_registration.sql
 supabase/migrations/0015_automatic_family_maintenance.sql
+supabase/migrations/0016_child_excuse_requests.sql
 ```
 
 `0004_family_bootstrap.sql` adds the `bootstrap_preview_family` RPC used by the parent Family Sync card. A signed-in parent can create the initial remote family, child profile, current week, starting allowance ledger entry, and preview chore schedule from the app.
@@ -191,6 +194,14 @@ supabase/migrations/0015_automatic_family_maintenance.sql
 `0014_submission_registration.sql` adds an authenticated, transactional photo-submission RPC and hardens no-photo submissions so only the linked child account with a child family role can submit assigned chores.
 
 `0015_automatic_family_maintenance.sql` moves allowance-period and task-deadline maintenance into idempotent server functions and installs a Supabase `pg_cron` job that runs every 15 minutes. After a parent saves the allowance amount, cadence, and next allowance date, periods close and reopen automatically, rollover debt is applied, missed deductions are created, and the current day's recurring chores are generated even when no phone opens the app. App refresh continues to call the same maintenance RPCs as an immediate fallback.
+
+`0016_child_excuse_requests.sql` adds the authenticated `request_chore_excuse` RPC. Only the account linked to the occurrence's child profile can request parent review, and the child receives no general occurrence-update permission.
+
+### Mutation Behavior
+
+Authenticated writes are remote-first. The app changes its local model, widget snapshot, and success state only after Supabase confirms the write. If a write fails, the current server-backed state and the user's draft input remain intact so the same action can be retried safely. New records use stable IDs during retries to prevent duplicate invites, chores, occurrences, and bonus entries.
+
+When no Supabase session exists, the bundled seed family remains an explicit local preview. Preview mutations are intentionally local-only and are replaced when a signed-in family is loaded.
 
 Evidence files should be stored under paths beginning with the family id:
 
@@ -293,12 +304,13 @@ psql "postgresql://postgres:${SUPABASE_DB_PASSWORD}@db.pjvgtmxyxrfhabyuefne.supa
   -f supabase/migrations/0014_submission_registration.sql
 psql "postgresql://postgres:${SUPABASE_DB_PASSWORD}@db.pjvgtmxyxrfhabyuefne.supabase.co:5432/postgres" \
   -f supabase/migrations/0015_automatic_family_maintenance.sql
+psql "postgresql://postgres:${SUPABASE_DB_PASSWORD}@db.pjvgtmxyxrfhabyuefne.supabase.co:5432/postgres" \
+  -f supabase/migrations/0016_child_excuse_requests.sql
 ```
 
 ## Next Slices
 
 1. Accept Zoe's child invite, then smoke-test photo upload, on-device people blocking, AI review, and parent evidence viewing across two physical devices.
 2. Add APNs-backed instant sync and parent-to-child nudges.
-3. Remove remaining production local-only mutation fallbacks so remote write failures are always explicit and retryable.
-4. Add a dedicated child allowance-day celebration and parent closeout review before the payment request handoff.
-5. Add orphaned-upload cleanup as a backstop for uploads interrupted before submission registration.
+3. Add a dedicated child allowance-day celebration and parent closeout review before the payment request handoff.
+4. Add orphaned-upload cleanup as a backstop for uploads interrupted before submission registration.

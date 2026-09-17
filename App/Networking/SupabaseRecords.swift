@@ -458,3 +458,15 @@ struct ParentReviewDecisionResponse: Decodable, Sendable {
         case status
     }
 }
+
+struct ChoreExcuseRequestResponse: Decodable, Sendable {
+    let occurrenceId: UUID
+    let status: String
+    let excuseReason: String
+
+    enum CodingKeys: String, CodingKey {
+        case occurrenceId = "occurrence_id"
+        case status
+        case excuseReason = "excuse_reason"
+    }
+}

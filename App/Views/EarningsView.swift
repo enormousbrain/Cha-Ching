@@ -623,6 +623,8 @@ struct AddBonusSheet: View {
     @State private var title = "Helped without being asked"
     @State private var amount = "2.00"
     @State private var note = ""
+    @State private var isSaving = false
+    @State private var entryId = UUID()
 
     var body: some View {
         NavigationStack {
@@ -633,6 +635,12 @@ struct AddBonusSheet: View {
                         .keyboardType(.decimalPad)
                     TextField("Note", text: $note, axis: .vertical)
                         .lineLimit(2...4)
+                }
+
+                if isSaving {
+                    Section {
+                        ProgressView("Saving bonus...")
+                    }
                 }
             }
             .navigationTitle("Add Bonus")
@@ -645,10 +653,22 @@ struct AddBonusSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Add") {
                         if let cents = Money.cents(fromDollarString: amount), !title.isEmpty {
-                            store.addBonus(title: title, amountCents: cents, note: note.isEmpty ? nil : note)
-                            dismiss()
+                            isSaving = true
+                            Task {
+                                let saved = await store.addBonus(
+                                    id: entryId,
+                                    title: title,
+                                    amountCents: cents,
+                                    note: note.isEmpty ? nil : note
+                                )
+                                isSaving = false
+                                if saved {
+                                    dismiss()
+                                }
+                            }
                         }
                     }
+                    .disabled(isSaving)
                 }
             }
         }

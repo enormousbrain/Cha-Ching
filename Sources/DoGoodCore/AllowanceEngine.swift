@@ -1,5 +1,25 @@
 import Foundation
 
+public enum MutationPersistenceMode: Equatable, Sendable {
+    case localPreview
+    case remoteRequired
+}
+
+@MainActor
+public enum MutationCommitter {
+    public static func commit(
+        mode: MutationPersistenceMode,
+        remoteSave: () async throws -> Void,
+        localCommit: () -> Void
+    ) async throws {
+        if mode == .remoteRequired {
+            try await remoteSave()
+        }
+
+        localCommit()
+    }
+}
+
 public struct AllowanceSummary: Equatable {
     public var weeklyBaseCents: Int
     public var activeDeductionCents: Int
