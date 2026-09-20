@@ -71,22 +71,45 @@ enum ParentTab: String, CaseIterable, Identifiable {
 
 struct ParentReviewQueueView: View {
     @EnvironmentObject private var store: AppStore
-    @State private var filter: ReviewFilter = .all
+    @State private var filter: ReviewFilter = .pending
+    @State private var showingBonus = false
+    @State private var showingPreviewReview = false
 
     private var visibleOccurrences: [TaskOccurrence] {
         switch filter {
-        case .all:
-            return store.occurrences
+        case .today:
+            return store.todayOccurrences.filter { $0.status.isOpen && !$0.status.needsParentReview }
         case .pending:
-            return store.pendingReviewOccurrences
+            return store.pendingReviewOccurrences.filter { $0.status != .rejected }.sorted { $0.updatedAt < $1.updatedAt }
         case .reviewed:
             return store.occurrences.filter { $0.status == .approved || $0.status == .excused || $0.status == .rejected }
+                .sorted { $0.updatedAt > $1.updatedAt }
         }
     }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 20) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(store.childName)
+                            .font(.title2.weight(.heavy))
+                        Text(store.allowancePeriodTitle)
+                            .font(.subheadline)
+                            .foregroundStyle(Color.mutedGray)
+                    }
+                    Spacer()
+                    Button { showingBonus = true } label: {
+                        Label("Bonus", systemImage: "plus.circle.fill")
+                            .font(.subheadline.weight(.bold))
+                    }
+                    .disabled(store.isMutationInFlight)
+                }
+
+                AllowanceTrajectoryView(compact: true)
+
+                Divider()
+
                 Picker("Review filter", selection: $filter) {
                     ForEach(ReviewFilter.allCases) { filter in
                         Text(filter.title).tag(filter)
@@ -95,16 +118,32 @@ struct ParentReviewQueueView: View {
                 .pickerStyle(.segmented)
 
                 if visibleOccurrences.isEmpty {
-                    ContentUnavailableView("Queue clear", systemImage: "checkmark.circle.fill")
-                        .frame(minHeight: 280)
+                    ContentUnavailableView(
+                        filter == .pending ? "All caught up" : (filter == .today ? "Nothing left today" : "No completed chores yet"),
+                        systemImage: filter == .pending ? "checkmark.circle" : "calendar",
+                        description: Text(filter == .pending ? "New submissions will appear here." : "")
+                    )
+                    .frame(minHeight: 140)
                 } else {
-                    VStack(spacing: 12) {
+                    HStack {
+                        Text(filter == .pending ? "Waiting for you" : filter.title)
+                            .font(.headline)
+                        Spacer()
+                        Text("\(visibleOccurrences.count)")
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(Color.mutedGray)
+                    }
+                    LazyVStack(spacing: 0) {
                         ForEach(visibleOccurrences) { occurrence in
-                            ReviewCard(
-                                occurrence: occurrence,
-                                chore: store.chore(for: occurrence),
-                                submission: store.submission(for: occurrence)
-                            )
+                            if let chore = store.chore(id: occurrence.choreDefinitionId) {
+                                NavigationLink {
+                                    ParentTaskReviewView(occurrenceId: occurrence.id)
+                                } label: {
+                                    ReviewQueueRow(occurrence: occurrence, chore: chore)
+                                }
+                                .buttonStyle(.plain)
+                                Divider()
+                            }
                         }
                     }
                 }
@@ -114,16 +153,173 @@ struct ParentReviewQueueView: View {
         .refreshable {
             await store.refreshRemoteFamilyState()
         }
+        .background(Color.paperWhite.ignoresSafeArea())
+        .sheet(isPresented: $showingBonus) { AddBonusSheet().environmentObject(store) }
+        .navigationDestination(isPresented: $showingPreviewReview) {
+            if let occurrence = store.pendingReviewOccurrences.first {
+                ParentTaskReviewView(occurrenceId: occurrence.id)
+            }
+        }
+        .onAppear {
+            #if DEBUG
+            showingPreviewReview = ProcessInfo.processInfo.environment["CHACHING_REVIEW_DETAIL"] == "1"
+            #endif
+        }
     }
 }
 
 enum ReviewFilter: String, CaseIterable, Identifiable {
-    case all
     case pending
+    case today
     case reviewed
 
     var id: String { rawValue }
-    var title: String { rawValue.capitalized }
+    var title: String {
+        switch self {
+        case .pending: return "Needs review"
+        case .today: return "Today"
+        case .reviewed: return "History"
+        }
+    }
+}
+
+struct ReviewQueueRow: View {
+    var occurrence: TaskOccurrence
+    var chore: ChoreDefinition
+
+    private var awaitsResponse: Bool {
+        occurrence.status.needsParentReview && occurrence.status != .rejected
+    }
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: awaitsResponse ? "tray.full.fill" : occurrence.status.isOpen ? "clock" : "checkmark.circle")
+                .font(.title3)
+                .foregroundStyle(awaitsResponse ? Color.inkBlack : Color.mutedGray)
+                .frame(width: 42, height: 42)
+                .background(awaitsResponse ? Color.sunYellow.opacity(0.3) : Color.softGray.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
+            VStack(alignment: .leading, spacing: 5) {
+                Text(chore.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.inkBlack)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(occurrence.excuseReason ?? occurrence.dueAt.formatted(date: .abbreviated, time: .shortened))
+                    .font(.caption)
+                    .foregroundStyle(Color.mutedGray)
+                    .lineLimit(2)
+                if !occurrence.status.isOpen {
+                    Text(occurrence.status == .aiReviewed || occurrence.status == .submitted ? "Awaiting decision" : occurrence.status.rawValue.capitalized)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(occurrence.status == .missed || occurrence.status == .rejected ? Color.warmOrange : Color.mutedGray)
+                }
+            }
+            Spacer(minLength: 8)
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color.mutedGray)
+        }
+        .padding(.vertical, 14)
+        .contentShape(Rectangle())
+    }
+}
+
+struct ParentTaskReviewView: View {
+    @EnvironmentObject private var store: AppStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var confirmingRejection = false
+    var occurrenceId: UUID
+
+    var body: some View {
+        ScrollView {
+            if let occurrence = store.occurrences.first(where: { $0.id == occurrenceId }),
+               let chore = store.chore(id: occurrence.choreDefinitionId) {
+                VStack(alignment: .leading, spacing: 24) {
+                    Text(chore.title).font(.title2.weight(.heavy))
+                    Label(occurrence.dueAt.formatted(date: .abbreviated, time: .shortened), systemImage: "calendar")
+                        .font(.subheadline).foregroundStyle(Color.mutedGray)
+                    if let reason = occurrence.excuseReason {
+                        Label(reason, systemImage: "hand.raised")
+                            .font(.subheadline)
+                    }
+                    ReviewCard(occurrence: occurrence, chore: chore, submission: store.submission(for: occurrence))
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("What was expected").font(.headline)
+                        Text(chore.instructions).font(.body).foregroundStyle(Color.mutedGray)
+                        Text("Deduction if missed: \(Money.dollars(chore.deductionCents))")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    NavigationLink("View allowance activity") { EarningsView(allowsBonusActions: true) }
+                        .font(.subheadline.weight(.semibold))
+                }
+                .padding(22)
+            } else {
+                ContentUnavailableView("Task no longer available", systemImage: "checkmark.circle")
+            }
+        }
+        .background(Color.paperWhite.ignoresSafeArea())
+        .navigationTitle("Task review")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.hidden, for: .tabBar)
+        .safeAreaInset(edge: .bottom) {
+            if let occurrence = store.occurrences.first(where: { $0.id == occurrenceId }), occurrence.status.needsParentReview && occurrence.status != .rejected {
+                VStack(spacing: 10) {
+                    if store.isMutationInFlight { ProgressView("Saving decision...").font(.caption) }
+                    HStack(spacing: 0) {
+                        decisionButton("Approve", icon: "checkmark", color: .green) {
+                            Task { if await store.approve(occurrence) { dismiss() } }
+                        }
+                        Divider().frame(height: 32)
+                        decisionButton("Retake", icon: "arrow.clockwise", color: .inkBlack) {
+                            Task { if await store.requestRetake(occurrence) { dismiss() } }
+                        }
+                        Divider().frame(height: 32)
+                        decisionButton("Reject", icon: "xmark", color: .warmOrange) {
+                            confirmingRejection = true
+                        }
+                    }
+                    .disabled(store.isMutationInFlight)
+                }
+                .padding(.horizontal, 22)
+                .padding(.vertical, 14)
+                .background(.regularMaterial)
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    if let occurrence = store.occurrences.first(where: { $0.id == occurrenceId }), occurrence.status.needsParentReview {
+                        Button {
+                            Task { if await store.excuse(occurrence, reason: "Parent excused") { dismiss() } }
+                        } label: { Label("Excuse without deduction", systemImage: "hand.raised") }
+                    }
+                } label: { Image(systemName: "ellipsis.circle") }
+                .accessibilityLabel("More review options")
+                .disabled(store.isMutationInFlight)
+            }
+        }
+        .confirmationDialog("Reject this submission?", isPresented: $confirmingRejection, titleVisibility: .visible) {
+            if let occurrence = store.occurrences.first(where: { $0.id == occurrenceId }) {
+                Button("Reject and apply deduction", role: .destructive) {
+                    Task { if await store.reject(occurrence) { dismiss() } }
+                }
+            }
+        } message: {
+            if let occurrence = store.occurrences.first(where: { $0.id == occurrenceId }),
+               let chore = store.chore(id: occurrence.choreDefinitionId) {
+                Text("The allowance will include a \(Money.dollars(chore.deductionCents)) deduction for this chore.")
+            }
+        }
+    }
+
+    private func decisionButton(_ title: String, icon: String, color: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .foregroundStyle(color)
+        }
+        .buttonStyle(.plain)
+    }
 }
 
 struct ReviewCard: View {
@@ -135,8 +331,14 @@ struct ReviewCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+            if let submission, submission.imageName.contains("/") {
+                ReviewEvidenceThumbnail(chore: chore, submission: submission, size: 240)
+                    .frame(maxWidth: .infinity)
+            }
             HStack(spacing: 14) {
-                ReviewEvidenceThumbnail(chore: chore, submission: submission)
+                if submission?.imageName.contains("/") != true {
+                    ReviewEvidenceThumbnail(chore: chore, submission: submission)
+                }
 
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
@@ -188,50 +390,7 @@ struct ReviewCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if occurrence.status.needsParentReview {
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                    SecondaryActionButton(title: "Approve", systemImage: "checkmark.circle.fill", tint: .acidLime) {
-                        Task {
-                            await store.approve(occurrence)
-                        }
-                    }
-                    .disabled(store.isMutationInFlight)
-                    SecondaryActionButton(title: "Reject", systemImage: "xmark.circle.fill", tint: .warmOrange) {
-                        Task {
-                            await store.reject(occurrence)
-                        }
-                    }
-                    .disabled(store.isMutationInFlight)
-                    SecondaryActionButton(
-                        title: "Excuse",
-                        systemImage: "hand.raised.fill",
-                        tint: .electricBlue.opacity(0.62),
-                        foregroundColor: .brandWhite
-                    ) {
-                        Task {
-                            await store.excuse(occurrence, reason: "Parent excused")
-                        }
-                    }
-                    .disabled(store.isMutationInFlight)
-                    SecondaryActionButton(
-                        title: "Retake",
-                        systemImage: "camera.rotate.fill",
-                        tint: .softGray,
-                        foregroundColor: .inkBlack
-                    ) {
-                        Task {
-                            await store.requestRetake(occurrence)
-                        }
-                    }
-                    .disabled(store.isMutationInFlight)
-                }
-
-                if let activeMutationTitle = store.activeMutationTitle {
-                    ProgressView(activeMutationTitle)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(Color.mutedGray)
-                }
-            } else if occurrence.status.isOpen {
+            if occurrence.status.isOpen {
                 SecondaryActionButton(
                     title: isSendingNudge ? "Sending" : "Nudge",
                     systemImage: "bell.badge.fill",
@@ -358,6 +517,7 @@ struct ReviewEvidenceThumbnail: View {
 
     var chore: ChoreDefinition
     var submission: ChoreSubmission?
+    var size: CGFloat = 76
 
     var body: some View {
         Button {
@@ -385,7 +545,7 @@ struct ReviewEvidenceThumbnail: View {
             Image(uiImage: image)
                 .resizable()
                 .scaledToFill()
-                .frame(width: 76, height: 76)
+                .frame(width: size, height: size)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .overlay(alignment: .bottomTrailing) {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
@@ -420,7 +580,7 @@ struct ReviewEvidenceThumbnail: View {
                         endPoint: .bottomTrailing
                     )
                 )
-                .frame(width: 76, height: 76)
+                .frame(width: size, height: size)
 
             if !isLoading && !loadFailed {
                 Image(systemName: iconName)

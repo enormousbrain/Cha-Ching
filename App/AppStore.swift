@@ -117,11 +117,25 @@ final class AppStore: ObservableObject {
     }
 
     var activeChores: [ChoreDefinition] {
-        chores.filter { $0.archivedAt == nil }
+        let referenceDate = Date()
+        return chores.filter { $0.archivedAt == nil }
+            .map { chore in
+                (chore: chore, dueAt: Self.date(onSameDayAs: referenceDate, time: chore.dueTime) ?? .distantFuture)
+            }
+            .sorted {
+                ($0.dueAt, $0.chore.id.uuidString) < ($1.dueAt, $1.chore.id.uuidString)
+            }
+            .map(\.chore)
     }
 
     var allowanceSummary: AllowanceSummary {
         AllowanceEngine.summary(for: ledger)
+    }
+
+    var allowanceTrend: [AllowanceTrendPoint] {
+        guard let period = activeAllowancePeriod else { return [] }
+        return AllowanceEngine.trajectory(for: ledger, from: period.startsAt, through: min(Date(), period.endsAt))
+            .map { AllowanceTrendPoint(date: $0.date, cents: $0.balanceCents, title: $0.title) }
     }
 
     var activeAllowancePeriod: AllowancePeriod? {
@@ -159,11 +173,8 @@ final class AppStore: ObservableObject {
         occurrences
             .filter { Calendar.current.isDateInToday($0.dueAt) }
             .sorted {
-            if $0.status == $1.status {
-                return $0.dueAt < $1.dueAt
+                ($0.dueAt, $0.id.uuidString) < ($1.dueAt, $1.id.uuidString)
             }
-            return urgencyRank($0.status) < urgencyRank($1.status)
-        }
     }
 
     var remainingCount: Int {
@@ -177,7 +188,6 @@ final class AppStore: ObservableObject {
     var nextDueOccurrence: TaskOccurrence? {
         todayOccurrences
             .filter { $0.status == .upcoming || $0.status == .due }
-            .sorted { $0.dueAt < $1.dueAt }
             .first
     }
 
@@ -2216,7 +2226,9 @@ final class AppStore: ObservableObject {
             rolloverDebtCents: summary.rolloverDebtCents,
             choresLeft: remainingCount,
             nextChoreTitle: nextChore?.shortTitle ?? "All done",
-            nextChoreTime: nextOccurrence.map { Self.widgetTimeFormatter.string(from: $0.dueAt) } ?? "Nice work"
+            nextChoreTime: nextOccurrence.map { Self.widgetTimeFormatter.string(from: $0.dueAt) } ?? "Nice work",
+            trend: allowanceTrend,
+            periodEndsAt: activeAllowancePeriod?.endsAt
         )
 
         guard ChaChingWidgetSharedState.saveSnapshot(snapshot) else {
@@ -2382,22 +2394,6 @@ final class AppStore: ObservableObject {
         )
     }
 
-    private func urgencyRank(_ status: TaskOccurrenceStatus) -> Int {
-        switch status {
-        case .due:
-            return 0
-        case .aiReviewed, .submitted:
-            return 1
-        case .upcoming:
-            return 2
-        case .missed, .rejected:
-            return 3
-        case .approved:
-            return 4
-        case .excused:
-            return 5
-        }
-    }
 }
 
 private extension RemoteAIReviewResult {

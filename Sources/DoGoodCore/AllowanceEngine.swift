@@ -43,6 +43,22 @@ public struct AllowanceSummary: Equatable {
 }
 
 public enum AllowanceEngine {
+    public static func trajectory(for entries: [LedgerEntry], from start: Date, through end: Date) -> [AllowanceBalancePoint] {
+        guard end >= start else { return [] }
+        let active = entries.filter { !$0.isVoided && $0.createdAt <= end }
+        var balance = active.filter { $0.type == .weeklyBase }.reduce(0) { $0 + $1.amountCents }
+        var points = [AllowanceBalancePoint(date: start, balanceCents: balance, title: "Starting allowance")]
+        let changes = active.filter { $0.type != .weeklyBase }.sorted {
+            $0.createdAt == $1.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.createdAt < $1.createdAt
+        }
+        for entry in changes {
+            balance += entry.type == .deduction ? -entry.amountCents : entry.amountCents
+            points.append(AllowanceBalancePoint(date: max(start, entry.createdAt), balanceCents: balance, title: entry.title))
+        }
+        points.append(AllowanceBalancePoint(date: end, balanceCents: balance, title: "Current balance"))
+        return points
+    }
+
     public static func summary(for entries: [LedgerEntry]) -> AllowanceSummary {
         let active = entries.filter { !$0.isVoided }
 
@@ -217,4 +233,10 @@ public enum AllowanceEngine {
             createdAt: createdAt
         )
     }
+}
+
+public struct AllowanceBalancePoint: Equatable, Sendable {
+    public var date: Date
+    public var balanceCents: Int
+    public var title: String
 }

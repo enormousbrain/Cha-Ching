@@ -199,94 +199,105 @@ struct InviteLandingSheet: View {
     @State private var phoneNumber = ""
     @State private var smsCode = ""
     @State private var hasRequestedCode = false
+    @FocusState private var isInputFocused: Bool
 
     var body: some View {
         NavigationStack {
-            VStack(alignment: .leading, spacing: 24) {
-                ZStack(alignment: .bottomTrailing) {
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [.sunYellow, .acidLime],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    ZStack(alignment: .bottomTrailing) {
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    colors: [.sunYellow, .acidLime],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
                             )
-                        )
-                        .frame(height: 180)
+                            .frame(height: 180)
 
-                    MascotCluster(scale: 0.72)
-                        .offset(x: 8, y: 12)
-                }
+                        MascotCluster(scale: 0.72)
+                            .offset(x: 8, y: 12)
+                    }
 
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("You're invited")
-                        .font(.system(size: 34, weight: .heavy, design: .rounded))
-                    Text("Sign in with this phone to join \(store.familyName) as \(invite.kind.roleTitle.lowercased()).")
-                        .font(.body)
-                        .foregroundStyle(Color.mutedGray)
-                }
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("You're invited")
+                            .font(.system(size: 34, weight: .heavy, design: .rounded))
+                        Text("Sign in with this phone to join \(store.familyName) as \(invite.kind.roleTitle.lowercased()).")
+                            .font(.body)
+                            .foregroundStyle(Color.mutedGray)
+                    }
 
-                VStack(alignment: .leading, spacing: 12) {
-                    TextField("Phone number", text: $phoneNumber)
-                        .textContentType(.telephoneNumber)
-                        .keyboardType(.phonePad)
-                        .font(.body.weight(.semibold))
-                        .textFieldStyle(.roundedBorder)
-
-                    if shouldShowCodeField {
-                        TextField("Text code", text: $smsCode)
-                            .textContentType(.oneTimeCode)
-                            .keyboardType(.numberPad)
+                    VStack(alignment: .leading, spacing: 12) {
+                        TextField("Phone number", text: $phoneNumber)
+                            .focused($isInputFocused)
+                            .textContentType(.telephoneNumber)
+                            .keyboardType(.phonePad)
                             .font(.body.weight(.semibold))
                             .textFieldStyle(.roundedBorder)
+
+                        if shouldShowCodeField {
+                            TextField("Text code", text: $smsCode)
+                                .focused($isInputFocused)
+                                .textContentType(.oneTimeCode)
+                                .keyboardType(.numberPad)
+                                .font(.body.weight(.semibold))
+                                .textFieldStyle(.roundedBorder)
+                        }
+
+                        if let errorMessage = store.inviteAcceptanceState.errorMessage {
+                            Text(errorMessage)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(Color.warmOrange)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+
+                        if let displayName = store.inviteAcceptanceState.acceptedDisplayName {
+                            Label("\(displayName) is connected as \(store.inviteAcceptanceState.acceptedRole?.title ?? invite.kind.roleTitle)", systemImage: "checkmark.circle.fill")
+                                .font(.headline)
+                                .foregroundStyle(Color.green)
+                        }
+
+                        PrimaryButton(title: primaryButtonTitle, systemImage: primaryButtonIcon) {
+                            performPrimaryAction()
+                        }
+                        .disabled(store.inviteAcceptanceState.isWorking)
                     }
 
-                    if let errorMessage = store.inviteAcceptanceState.errorMessage {
-                        Text(errorMessage)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(Color.warmOrange)
-                    }
+                    #if DEBUG
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(invite.token)
+                            .font(.caption.monospaced().weight(.bold))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(14)
+                            .background(Color.softGray.opacity(0.7), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
 
-                    if let displayName = store.inviteAcceptanceState.acceptedDisplayName {
-                        Label("\(displayName) is connected as \(store.inviteAcceptanceState.acceptedRole?.title ?? invite.kind.roleTitle)", systemImage: "checkmark.circle.fill")
-                            .font(.headline)
-                            .foregroundStyle(Color.green)
+                        Button {
+                            store.switchSession(to: .child)
+                            store.clearPendingInvite()
+                            dismiss()
+                        } label: {
+                            Label("Preview as Child", systemImage: "sparkles")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(Color.inkBlack)
+                        }
+                        .buttonStyle(.plain)
                     }
-
-                    PrimaryButton(title: primaryButtonTitle, systemImage: primaryButtonIcon) {
-                        performPrimaryAction()
-                    }
-                    .disabled(store.inviteAcceptanceState.isWorking)
+                    #endif
                 }
-
-                #if DEBUG
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(invite.token)
-                        .font(.caption.monospaced().weight(.bold))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(14)
-                        .background(Color.softGray.opacity(0.7), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-                    Button {
-                        store.switchSession(to: .child)
-                        store.clearPendingInvite()
-                        dismiss()
-                    } label: {
-                        Label("Preview as Child", systemImage: "sparkles")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(Color.inkBlack)
-                    }
-                    .buttonStyle(.plain)
-                }
-                #endif
-
-                Spacer()
+                .padding(22)
             }
-            .padding(22)
+            .scrollDismissesKeyboard(.interactively)
             .background(Color.paperWhite.ignoresSafeArea())
             .navigationTitle("Invite")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") { isInputFocused = false }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") {
                         store.clearPendingInvite()
@@ -333,6 +344,7 @@ struct InviteLandingSheet: View {
     }
 
     private func performPrimaryAction() {
+        isInputFocused = false
         if store.inviteAcceptanceState.acceptedDisplayName != nil {
             store.clearPendingInvite()
             dismiss()

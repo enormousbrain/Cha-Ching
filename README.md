@@ -48,6 +48,8 @@ Current display name: `ChaChing`
 - Remote-first authenticated mutations that update local app and widget state only after Supabase succeeds, with stable retry IDs and retained form input after failures
 - Linked-child Supabase RPC for requesting a parent excuse review without granting broader occurrence update access
 - Parent review queue actions
+- Focused parent review inbox with Needs review, Today, and History sections; task decisions use a persistent iPhone Calendar-style response bar
+- Ledger-based allowance trajectory in Review and Earnings, with compact Home Screen widget sparklines shared by parents and children
 - Parent chore editing
 - Supabase-backed current earnings, daily ledger activity, and archived allowance-period browsing
 - Static lock-screen and home-screen widget previews
@@ -97,7 +99,9 @@ xcodebuild -project ChaChing.xcodeproj -scheme ChaChing \
   -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' build
 ```
 
-The current core suite contains 22 passing tests, and the app plus widget extension compile for the iOS Simulator.
+The current core suite contains 24 passing tests, and the app plus widget extension compile for the iOS Simulator.
+
+The allowance graph starts with the period's base ledger amount and applies active bonuses, deductions, and adjustments in timestamp order. Voided entries are excluded, so it represents the currently effective ledger rather than a historical audit of subsequently reversed decisions. The line ends at the latest refresh within the period; future days are left blank. Negative balances show rollover debt, while the payable balance remains floored at zero. Older widget snapshots without graph points continue to use the progress bar until the app refreshes them.
 
 ## Supabase
 

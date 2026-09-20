@@ -92,7 +92,15 @@ struct HomeScreenWidgetCard: View {
                     .frame(width: 72, height: 76)
             }
 
-            CapsuleProgress(value: store.allowanceSummary.progress)
+            AllowanceTrendChart(
+                points: store.allowanceTrend,
+                baseCents: store.allowanceSummary.weeklyBaseCents,
+                endsAt: store.activeAllowancePeriod?.endsAt ?? Date(),
+                tint: .inkBlack,
+                compact: true,
+                selectedDate: .constant(nil)
+            )
+            .frame(height: 54)
 
             Text("\(store.remainingCount) chores left")
                 .font(.headline.weight(.heavy))

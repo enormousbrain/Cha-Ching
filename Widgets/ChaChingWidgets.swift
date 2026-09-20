@@ -12,6 +12,8 @@ struct ChaChingAllowanceEntry: TimelineEntry {
     let choresLeft: Int
     let nextChoreTitle: String
     let nextChoreTime: String
+    var trend: [AllowanceTrendPoint] = []
+    var periodEndsAt: Date? = nil
 
     var progress: Double {
         guard baseCents > 0 else { return 0 }
@@ -61,7 +63,9 @@ struct ChaChingAllowanceProvider: TimelineProvider {
             rolloverDebtCents: snapshot.rolloverDebtCents,
             choresLeft: snapshot.choresLeft,
             nextChoreTitle: snapshot.nextChoreTitle,
-            nextChoreTime: snapshot.nextChoreTime
+            nextChoreTime: snapshot.nextChoreTime,
+            trend: snapshot.trend ?? [],
+            periodEndsAt: snapshot.periodEndsAt
         )
     }
 
@@ -75,7 +79,15 @@ struct ChaChingAllowanceProvider: TimelineProvider {
             rolloverDebtCents: 0,
             choresLeft: 2,
             nextChoreTitle: "Take Dog Out",
-            nextChoreTime: "8:00 PM"
+            nextChoreTime: "8:00 PM",
+            trend: [
+                AllowanceTrendPoint(date: Date().addingTimeInterval(-4 * 86400), cents: 1500, title: "Starting allowance"),
+                AllowanceTrendPoint(date: Date().addingTimeInterval(-3 * 86400), cents: 1400, title: "Deduction"),
+                AllowanceTrendPoint(date: Date().addingTimeInterval(-2 * 86400), cents: 1600, title: "Bonus"),
+                AllowanceTrendPoint(date: Date().addingTimeInterval(-86400), cents: 1350, title: "Deduction"),
+                AllowanceTrendPoint(date: Date(), cents: 1350, title: "Current balance")
+            ],
+            periodEndsAt: Date().addingTimeInterval(2 * 86400)
         )
     }
 }
@@ -98,26 +110,31 @@ struct ChaChingAllowanceWidgetView: View {
     }
 
     private var smallWidget: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(entry.periodTitle)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(Color.ccMuted)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
                 Spacer()
                 LimeFace()
-                    .frame(width: 34, height: 36)
+                    .frame(width: 24, height: 26)
             }
 
             Text(dollars(entry.currentCents))
-                .font(.system(size: 30, weight: .heavy, design: .rounded))
+                .font(.system(size: 28, weight: .heavy, design: .rounded))
                 .foregroundStyle(Color.ccInk)
                 .minimumScaleFactor(0.72)
 
-            ProgressBar(value: entry.progress)
+            miniTrend
+                .frame(height: 30)
 
             Text(entry.choresLeftText)
                 .font(.caption.weight(.heavy))
                 .foregroundStyle(Color.ccInk)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
 
             Spacer(minLength: 0)
         }
@@ -126,38 +143,40 @@ struct ChaChingAllowanceWidgetView: View {
     }
 
     private var mediumWidget: some View {
-        HStack(spacing: 16) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text(entry.periodTitle)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color.ccMuted)
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("\(entry.childName) · \(entry.periodTitle)")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.ccMuted)
+                        .lineLimit(1)
                     Text(dollars(entry.currentCents))
-                        .font(.system(size: 34, weight: .heavy, design: .rounded))
-                    Text("/ \(dollars(entry.baseCents))")
-                        .font(.subheadline.weight(.bold))
+                        .font(.system(size: 30, weight: .heavy, design: .rounded))
+                        .foregroundStyle(Color.ccInk)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                    Text("Started \(dollars(entry.baseCents))")
+                        .font(.caption2)
                         .foregroundStyle(Color.ccMuted)
                 }
-                .foregroundStyle(Color.ccInk)
-
-                ProgressBar(value: entry.progress)
-
-                Text(entry.choresLeftText)
-                    .font(.headline.weight(.heavy))
-                    .foregroundStyle(Color.ccInk)
-
-                Label("\(entry.nextChoreTitle) · \(entry.nextChoreTime)", systemImage: "clock")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color.ccMuted)
-                    .lineLimit(1)
+                miniTrend
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 64)
             }
-
-            Spacer(minLength: 0)
-
-            LimeFace()
-                .frame(width: 72, height: 78)
+            HStack(alignment: .top, spacing: 12) {
+                Text(entry.choresLeftText)
+                    .font(.caption.weight(.heavy))
+                    .foregroundStyle(Color.ccInk)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Label("\(entry.nextChoreTitle) · \(entry.nextChoreTime)", systemImage: "clock")
+                    .font(.caption2)
+                    .foregroundStyle(Color.ccMuted)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.trailing)
+            }
         }
-        .padding(18)
+        .padding(16)
         .containerBackground(Color.ccPaper, for: .widget)
     }
 
@@ -168,6 +187,22 @@ struct ChaChingAllowanceWidgetView: View {
             Text(dollars(entry.currentCents).replacingOccurrences(of: ".00", with: ""))
         }
         .gaugeStyle(.accessoryCircularCapacity)
+    }
+
+    @ViewBuilder
+    private var miniTrend: some View {
+        if entry.trend.isEmpty {
+            ProgressBar(value: entry.progress)
+        } else {
+            AllowanceTrendChart(
+                points: entry.trend,
+                baseCents: entry.baseCents,
+                endsAt: entry.periodEndsAt ?? entry.date,
+                tint: .ccInk,
+                compact: true,
+                selectedDate: .constant(nil)
+            )
+        }
     }
 
     private var accessoryRectangular: some View {
@@ -251,6 +286,7 @@ struct ChaChingAllowanceWidget: Widget {
         .configurationDisplayName("ChaChing Allowance")
         .description("Check allowance progress and the next chore.")
         .supportedFamilies([.systemSmall, .systemMedium, .accessoryCircular, .accessoryRectangular])
+        .contentMarginsDisabled()
     }
 }
 

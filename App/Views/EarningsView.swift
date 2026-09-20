@@ -64,6 +64,7 @@ struct EarningsView: View {
             )
 
             PeriodDateRange(period: period)
+            AllowanceTrajectoryView()
             AllowanceSummaryRows(summary: store.allowanceSummary)
 
             if !allowsBonusActions {
@@ -99,6 +100,67 @@ struct EarningsView: View {
                 description: Text("Pull to refresh after your family finishes setup.")
             )
         }
+    }
+}
+
+struct AllowanceTrajectoryView: View {
+    @EnvironmentObject private var store: AppStore
+    @State private var selectedDate: Date?
+    var compact = false
+
+    private var selectedPoint: AllowanceTrendPoint? {
+        guard let selectedDate else { return nil }
+        return store.allowanceTrend.last { $0.date <= selectedDate } ?? store.allowanceTrend.first
+    }
+
+    var body: some View {
+        let summary = store.allowanceSummary
+        let change = summary.currentTotalCents - summary.rolloverDebtCents - summary.weeklyBaseCents
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(Money.dollars(selectedPoint?.cents ?? summary.currentTotalCents))
+                    .font(.system(size: 36, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
+                Spacer()
+                Label(Money.dollars(change, signed: true), systemImage: change > 0 ? "arrow.up.right" : change < 0 ? "arrow.down.right" : "minus")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(change < 0 ? Color.warmOrange : Color.inkBlack)
+            }
+            Text(selectedPoint.map { "\($0.title) · \($0.date.formatted(date: .abbreviated, time: .shortened))" }
+                 ?? "Started with \(Money.dollars(summary.weeklyBaseCents))")
+                .font(.caption)
+                .foregroundStyle(Color.mutedGray)
+                .lineLimit(2)
+                .frame(height: 32, alignment: .topLeading)
+
+            if let period = store.activeAllowancePeriod {
+                AllowanceTrendChart(
+                    points: store.allowanceTrend,
+                    baseCents: summary.weeklyBaseCents,
+                    endsAt: period.endsAt,
+                    tint: .inkBlack,
+                    selectedDate: $selectedDate
+                )
+                .frame(height: compact ? 110 : 150)
+            }
+
+            HStack(spacing: 18) {
+                Label("\(Money.dollars(summary.bonusCents)) bonuses", systemImage: "plus.circle.fill")
+                    .foregroundStyle(Color.inkBlack)
+                Label("\(Money.dollars(summary.activeDeductionCents)) deductions", systemImage: "minus.circle.fill")
+                    .foregroundStyle(Color.warmOrange)
+            }
+            .font(.caption.weight(.semibold))
+            .fixedSize(horizontal: false, vertical: true)
+
+            if summary.hasRolloverDebt {
+                Text("Payout is $0.00. \(Money.dollars(summary.rolloverDebtCents)) carries into next period.")
+                    .font(.caption).foregroundStyle(Color.mutedGray)
+            }
+        }
+        .foregroundStyle(Color.inkBlack)
     }
 }
 

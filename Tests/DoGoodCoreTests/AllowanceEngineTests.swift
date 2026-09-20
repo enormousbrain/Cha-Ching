@@ -2,6 +2,33 @@ import XCTest
 @testable import DoGoodCore
 
 final class AllowanceEngineTests: XCTestCase {
+    func testTrajectoryTracksBonusesDeductionsAndDebtWithoutClamping() {
+        let start = Date(timeIntervalSince1970: 1000)
+        let week = UUID()
+        let entries = [
+            AllowanceEngine.weeklyBaseEntry(weekId: week, amountCents: 1500, createdAt: start),
+            AllowanceEngine.bonusEntry(weekId: week, title: "Helped", amountCents: 200, createdAt: start.addingTimeInterval(10)),
+            AllowanceEngine.deductionEntry(weekId: week, occurrenceId: UUID(), choreTitle: "Chore", amountCents: 2000, createdAt: start.addingTimeInterval(20))
+        ]
+        let points = AllowanceEngine.trajectory(for: entries.reversed(), from: start, through: start.addingTimeInterval(30))
+        XCTAssertEqual(points.map(\.balanceCents), [1500, 1700, -300, -300])
+        XCTAssertEqual(points.last?.date, start.addingTimeInterval(30))
+    }
+
+    func testTrajectoryExcludesVoidedAndFutureEntries() {
+        let start = Date(timeIntervalSince1970: 1000)
+        let week = UUID()
+        var voided = AllowanceEngine.deductionEntry(weekId: week, occurrenceId: UUID(), choreTitle: "Excused", amountCents: 500, createdAt: start)
+        voided.isVoided = true
+        let entries = [
+            AllowanceEngine.weeklyBaseEntry(weekId: week, amountCents: 1500, createdAt: start),
+            voided,
+            AllowanceEngine.bonusEntry(weekId: week, title: "Future", amountCents: 200, createdAt: start.addingTimeInterval(100))
+        ]
+        XCTAssertEqual(AllowanceEngine.trajectory(for: entries, from: start, through: start.addingTimeInterval(50)).map(\.balanceCents), [1500, 1500])
+        XCTAssertTrue(AllowanceEngine.trajectory(for: entries, from: start, through: start.addingTimeInterval(-1)).isEmpty)
+    }
+
     func testSeedStateStartsAtThirteenFifty() {
         let snapshot = SeedData.snapshot()
         let summary = AllowanceEngine.summary(for: snapshot.ledger)
