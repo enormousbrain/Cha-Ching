@@ -7,6 +7,7 @@ public struct ChoreReminderItem: Codable, Equatable, Sendable, Identifiable {
     public var dueAt: Date
     public var expiresAt: Date
     public var offsets: [Int]
+    public var location: ChoreLocation?
 }
 
 public struct ChoreReminderDelay: Codable, Equatable, Sendable {
@@ -52,9 +53,16 @@ public enum ChoreReminderPlanner {
                 let actualDue = occurrence?.dueAt ?? dueAt
                 let expiresAt = occurrence?.expiresAt ?? actualDue.addingTimeInterval(Double(chore.dueWindowMinutes) * 60)
                 guard expiresAt > now else { continue }
+                var offsets = chore.reminderOffsetsMinutes
+                if let location = chore.location,
+                   location.leaveReminderMinutes > 0,
+                   !offsets.contains(location.leaveReminderMinutes) {
+                    offsets.append(location.leaveReminderMinutes)
+                }
                 result.append(ChoreReminderItem(id: id, choreId: chore.id, title: chore.title,
                                                 dueAt: actualDue, expiresAt: expiresAt,
-                                                offsets: chore.reminderOffsetsMinutes))
+                                                offsets: offsets,
+                                                location: chore.location))
             }
         }
         return result.sorted { ($0.dueAt, $0.id) < ($1.dueAt, $1.id) }

@@ -31,6 +31,7 @@ final class AppStore: ObservableObject {
     @Published var evidencePolicy: FamilyEvidencePolicy
     @Published var notificationState: NotificationState
     @Published var reminderChoreIds: [UUID]?
+    @Published var reminderOccurrenceId: UUID?
     @Published private(set) var savingsGoals: [SavingsGoal] = []
     @Published var familySyncState: FamilySyncState
     @Published var mutationFailure: MutationFailure?
@@ -43,6 +44,7 @@ final class AppStore: ObservableObject {
     private let deliveredNudgeIdsKey = "chaching.deliveredNudgeIds"
     private var lastAutomaticRemoteRefreshAt: Date?
     private var reminderStateReady = false
+    private var pushObserver: NSObjectProtocol?
 
     @Published private(set) var familyId: UUID
     @Published private(set) var parentId: UUID
@@ -96,6 +98,9 @@ final class AppStore: ObservableObject {
         reminderStateReady = SupabaseClientProvider.shared.auth.currentSession == nil
         #endif
         publishWidgetSnapshot()
+        pushObserver = NotificationCenter.default.addObserver(forName: .chachingAPNsTokenAvailable, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in await self?.syncAPNsDeviceToken() }
+        }
     }
 
     var activeRole: FamilyMemberRole {
@@ -243,7 +248,22 @@ final class AppStore: ObservableObject {
         await loadRemoteFamilyStateIfSignedIn(force: true)
     }
 
-    func loadRemoteFamilyState() async {
+    func switchParentChild(to id: UUID) async {
+        guard isParentSession, childProfiles.contains(where: { $0.id == id }) else { return }
+        guard SupabaseClientProvider.shared.auth.currentSession != nil else {
+            if let profile = childProfiles.first(where: { $0.id == id }) {
+                childId = profile.id
+                childName = profile.displayName
+                chores = chores.filter { $0.childId == id }
+                occurrences = occurrences.filter { $0.childId == id }
+                publishWidgetSnapshot()
+            }
+            return
+        }
+        await loadRemoteFamilyState(selectingChildId: id)
+    }
+
+    func loadRemoteFamilyState(selectingChildId: UUID? = nil) async {
         familySyncState = .loading
 
         do {
@@ -255,7 +275,7 @@ final class AppStore: ObservableObject {
                 return
             }
 
-            try await applyRemoteFamilyState(for: membership, authUserId: authSession.user.id)
+            try await applyRemoteFamilyState(for: membership, authUserId: authSession.user.id, selectingChildId: selectingChildId)
             familySyncState = .synced("Synced \(familyName) across devices.")
         } catch {
             familySyncState = .failed(error.localizedDescription)
@@ -910,19 +930,22 @@ final class AppStore: ObservableObject {
         )
     }
 
-    func sendNudge(for occurrence: TaskOccurrence) async {
-        guard occurrence.status.isOpen else {
-            return
+    func sendNudge(for occurrence: TaskOccurrence) async -> Bool {
+        guard isParentSession, occurrence.childId == childId,
+              occurrence.status.isOpen || occurrence.status == .missed else {
+            return false
         }
 
         guard SupabaseClientProvider.shared.auth.currentSession != nil else {
             familySyncState = .failed("Sign in before sending a nudge.")
-            return
+            return false
         }
 
         let chore = chore(for: occurrence)
         let dueTime = Self.widgetTimeFormatter.string(from: occurrence.dueAt)
-        let message = "\(chore.shortTitle) is still waiting. Due \(dueTime)."
+        let message = occurrence.status == .missed
+            ? "This chore was missed. Please check in with your parent about what to do next."
+            : "This chore is still waiting. Due \(dueTime)."
 
         do {
             _ = try await remoteStore.currentSession()
@@ -933,9 +956,11 @@ final class AppStore: ObservableObject {
                 createdBy: session.userId,
                 message: message
             )
-            familySyncState = .synced("Nudge sent for \(chore.shortTitle).")
+            familySyncState = .synced("Alert queued for \(chore.shortTitle).")
+            return true
         } catch {
             familySyncState = .failed("Nudge did not send: \(error.localizedDescription)")
+            return false
         }
     }
 
@@ -1095,10 +1120,26 @@ final class AppStore: ObservableObject {
             }
 
             try await scheduleLocalNotifications()
+            UIApplication.shared.registerForRemoteNotifications()
             notificationState = .scheduled
         } catch {
             notificationState = .failed(error.localizedDescription)
         }
+    }
+
+    private func syncAPNsDeviceToken() async {
+        guard reminderStateReady,
+              let token = UserDefaults.standard.string(forKey: PushTokenStore.key),
+              !token.isEmpty,
+              SupabaseClientProvider.shared.auth.currentSession != nil else { return }
+        do {
+            #if DEBUG
+            let environment = "sandbox"
+            #else
+            let environment = "production"
+            #endif
+            try await remoteStore.upsertAPNsDeviceToken(familyId: familyId, token: token, environment: environment)
+        } catch { debugPrint("Unable to register APNs token:", error.localizedDescription) }
     }
 
     func refreshNotificationScheduleIfAuthorized() async {
@@ -1201,6 +1242,8 @@ final class AppStore: ObservableObject {
         content.body = choreTitle.map { "\($0): \(nudge.message)" } ?? nudge.message
         content.sound = .default
         content.userInfo = [
+            "owner": "\(session.userId).\(familyId).\(childId)",
+            "chore_id": occurrences.first { $0.id == nudge.taskOccurrenceId }?.choreDefinitionId.uuidString ?? "",
             "kind": "task_nudge",
             "nudge_id": nudge.id.uuidString,
             "task_occurrence_id": nudge.taskOccurrenceId.uuidString
@@ -1241,7 +1284,10 @@ final class AppStore: ObservableObject {
         dueTime: String,
         recurrence: ChoreRecurrence,
         verificationMode: VerificationMode,
-        blockPeopleInPhotos: Bool
+        blockPeopleInPhotos: Bool,
+        parentAlertEnabled: Bool = false,
+        parentAlertDelayMinutes: Int = 0,
+        location: ChoreLocation? = nil
     ) async -> Bool {
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedDueTime = dueTime.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1269,6 +1315,9 @@ final class AppStore: ObservableObject {
             recurrence: recurrence,
             dueTime: trimmedDueTime,
             dueWindowMinutes: dueWindowMinutes
+            , parentAlertEnabled: parentAlertEnabled
+            , parentAlertDelayMinutes: parentAlertDelayMinutes
+            , location: location
         )
         let occurrence: TaskOccurrence? = recurrence.occurs(on: now) ? TaskOccurrence(
             id: chore.id,
@@ -1317,7 +1366,10 @@ final class AppStore: ObservableObject {
         dueTime: String,
         recurrence: ChoreRecurrence,
         verificationMode: VerificationMode,
-        blockPeopleInPhotos: Bool
+        blockPeopleInPhotos: Bool,
+        parentAlertEnabled: Bool = false,
+        parentAlertDelayMinutes: Int = 0,
+        location: ChoreLocation? = nil
     ) async -> Bool {
         guard let index = chores.firstIndex(where: { $0.id == chore.id }) else {
             return failMutation(actionTitle: "Save chore", message: "This chore is no longer available. Refresh and try again.")
@@ -1354,6 +1406,9 @@ final class AppStore: ObservableObject {
         updatedChore.dueTime = trimmedDueTime
         updatedChore.verificationMode = verificationMode
         updatedChore.blockPeopleInPhotos = blockPeopleInPhotos
+        updatedChore.parentAlertEnabled = parentAlertEnabled
+        updatedChore.parentAlertDelayMinutes = max(0, parentAlertDelayMinutes)
+        updatedChore.location = location
         updatedChore.updatedAt = Date()
 
         let saved = await commitMutation(
@@ -1371,7 +1426,10 @@ final class AppStore: ObservableObject {
                     dueTime: trimmedDueTime,
                     recurrence: recurrence,
                     verificationMode: verificationMode,
-                    blockPeopleInPhotos: blockPeopleInPhotos
+                    blockPeopleInPhotos: blockPeopleInPhotos,
+                    parentAlertEnabled: parentAlertEnabled,
+                    parentAlertDelayMinutes: parentAlertDelayMinutes,
+                    location: location
                 )
                 for update in occurrenceUpdates {
                     _ = try await remoteStore.updateOccurrenceTiming(
@@ -1501,7 +1559,7 @@ final class AppStore: ObservableObject {
         publishWidgetSnapshot()
     }
 
-    private func applyRemoteFamilyState(for membership: FamilyMemberRecord, authUserId: UUID) async throws {
+    private func applyRemoteFamilyState(for membership: FamilyMemberRecord, authUserId: UUID, selectingChildId: UUID? = nil) async throws {
         let role = FamilyMemberRole(rawValue: membership.role) ?? .parent
         let familyRecord = try await remoteStore.fetchFamily(id: membership.familyId)
         let memberRecords = try await remoteStore.fetchFamilyMembers(familyId: membership.familyId)
@@ -1511,7 +1569,8 @@ final class AppStore: ObservableObject {
         guard let selectedChildProfile = selectedRemoteChildProfile(
             from: profileRecords,
             role: role,
-            authUserId: authUserId
+            authUserId: authUserId,
+            preferredChildId: selectingChildId
         ) else {
             throw FamilySyncError.missingChildProfile
         }
@@ -1568,6 +1627,7 @@ final class AppStore: ObservableObject {
             .map { localChoreDefinition(from: $0) }
         occurrences = remoteOccurrences
         reminderStateReady = true
+        await syncAPNsDeviceToken()
         submissions = remoteSubmissions
         ledger = entriesByWeek[weekRecord.id] ?? []
         allowancePeriods = weekRecords.map {
@@ -1601,11 +1661,13 @@ final class AppStore: ObservableObject {
     private func selectedRemoteChildProfile(
         from profiles: [ChildProfileRecord],
         role: FamilyMemberRole,
-        authUserId: UUID
+        authUserId: UUID,
+        preferredChildId: UUID? = nil
     ) -> ChildProfileRecord? {
         switch role {
         case .parent:
-            return profiles.sorted { $0.createdAt < $1.createdAt }.first
+            return profiles.first { $0.id == preferredChildId }
+                ?? profiles.sorted { $0.createdAt < $1.createdAt }.first
         case .child:
             return profiles.first { $0.linkedUserId == authUserId }
                 ?? profiles.sorted { $0.createdAt < $1.createdAt }.first
@@ -1661,6 +1723,20 @@ final class AppStore: ObservableObject {
             dueTime: record.recurrence.times?.first ?? "8:00 PM",
             dueWindowMinutes: record.dueWindowMinutes,
             reminderOffsetsMinutes: record.reminderOffsetsMinutes,
+            parentAlertEnabled: record.parentAlertEnabled,
+            parentAlertDelayMinutes: record.parentAlertDelayMinutes,
+            location: {
+                guard let name = record.locationName,
+                      let latitude = record.locationLatitude,
+                      let longitude = record.locationLongitude else { return nil }
+                return ChoreLocation(
+                    name: name,
+                    latitude: latitude,
+                    longitude: longitude,
+                    radiusMeters: record.locationRadiusMeters ?? 200,
+                    leaveReminderMinutes: record.locationLeaveReminderMinutes ?? 30
+                )
+            }(),
             isPaused: record.isPaused,
             archivedAt: record.archivedAt,
             createdAt: record.createdAt,

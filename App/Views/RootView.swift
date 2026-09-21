@@ -28,7 +28,10 @@ struct RootView: View {
                 .environmentObject(store)
         }
         .sheet(isPresented: Binding(get: { store.reminderChoreIds != nil }, set: {
-            if !$0 { store.reminderChoreIds = nil }
+            if !$0 {
+                store.reminderChoreIds = nil
+                store.reminderOccurrenceId = nil
+            }
         })) {
             ReminderChoreListView()
                 .environmentObject(store)

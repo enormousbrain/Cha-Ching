@@ -5,13 +5,18 @@ import SwiftUI
 struct ChaChingApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var store: AppStore
+    @UIApplicationDelegateAdaptor(ChaChingAppDelegate.self) private var appDelegate
 
     init() {
         let store = AppStore()
         _store = StateObject(wrappedValue: store)
-        ChoreReminderCenter.shared.configure { [weak store] choreIds in
+        ChoreReminderCenter.shared.configure(onOpen: { [weak store] choreIds in
+            store?.reminderOccurrenceId = nil
             store?.reminderChoreIds = choreIds
-        }
+        }, onNudge: { [weak store] occurrenceId in
+            store?.reminderOccurrenceId = occurrenceId
+            store?.reminderChoreIds = []
+        })
         ChaChingBackgroundRefresh.shared.configure(store: store)
     }
 

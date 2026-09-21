@@ -2,6 +2,29 @@ import XCTest
 @testable import DoGoodCore
 
 final class AllowanceEngineTests: XCTestCase {
+    func testChoreInsightsExcludeUnresolvedExcusedAndOtherChildren() {
+        let seed = SeedData.snapshot()
+        let chore = seed.chores[0]
+        let now = Date()
+        func occurrence(_ status: TaskOccurrenceStatus, child: UUID? = nil) -> TaskOccurrence {
+            TaskOccurrence(choreDefinitionId: chore.id, childId: child ?? chore.childId, weekId: UUID(),
+                           scheduledAt: now.addingTimeInterval(-7200), dueAt: now.addingTimeInterval(-3600),
+                           expiresAt: now.addingTimeInterval(-60), status: status)
+        }
+        let missed = occurrence(.missed)
+        let rows = [missed, missed, occurrence(.missed), occurrence(.approved), occurrence(.excused),
+                    occurrence(.due), occurrence(.upcoming), occurrence(.missed, child: UUID())]
+        let insight = ChoreInsight.summarize(chores: [chore], occurrences: rows, childId: chore.childId, now: now).first
+        XCTAssertEqual(insight?.missedCount, 2)
+        XCTAssertEqual(insight?.observedCount, 3)
+        XCTAssertEqual(insight?.suggestsScheduleReview, true)
+        let small = ChoreInsight.summarize(chores: [chore], occurrences: [missed], childId: chore.childId, now: now)
+        XCTAssertFalse(small[0].suggestsScheduleReview)
+        let rejected = ChoreInsight.summarize(chores: [chore], occurrences: [missed, occurrence(.rejected)], childId: chore.childId, now: now)
+        XCTAssertEqual(rejected[0].missedCount, 1)
+        XCTAssertEqual(rejected[0].observedCount, 2)
+        XCTAssertTrue(ChoreInsight.summarize(chores: [chore], occurrences: [occurrence(.approved)], childId: chore.childId, now: now).isEmpty)
+    }
     func testSavingsGoalValidationAndRoundTrip() throws {
         let goal = SavingsGoal(title: "A bike", targetCents: 15000)
         XCTAssertTrue(goal.isValid)

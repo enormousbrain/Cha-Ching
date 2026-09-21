@@ -17,6 +17,28 @@ public struct SavingsGoal: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
+public struct ChoreLocation: Codable, Equatable, Sendable {
+    public var name: String
+    public var latitude: Double
+    public var longitude: Double
+    public var radiusMeters: Double
+    public var leaveReminderMinutes: Int
+
+    public init(name: String, latitude: Double, longitude: Double, radiusMeters: Double = 200,
+                leaveReminderMinutes: Int = 30) {
+        self.name = name
+        self.latitude = latitude
+        self.longitude = longitude
+        self.radiusMeters = min(1000, max(100, radiusMeters))
+        self.leaveReminderMinutes = min(180, max(0, leaveReminderMinutes))
+    }
+
+    public var isValid: Bool {
+        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (-90...90).contains(latitude) && (-180...180).contains(longitude)
+    }
+}
+
 public enum FamilyMemberRole: String, Codable, CaseIterable, Identifiable, Sendable {
     case parent
     case child
@@ -696,6 +718,9 @@ public struct ChoreDefinition: Identifiable, Codable, Equatable, Sendable {
     public var dueTime: String
     public var dueWindowMinutes: Int
     public var reminderOffsetsMinutes: [Int]
+    public var parentAlertEnabled: Bool
+    public var parentAlertDelayMinutes: Int
+    public var location: ChoreLocation?
     public var isPaused: Bool
     public var archivedAt: Date?
     public var createdAt: Date
@@ -719,6 +744,9 @@ public struct ChoreDefinition: Identifiable, Codable, Equatable, Sendable {
         dueTime: String,
         dueWindowMinutes: Int = 90,
         reminderOffsetsMinutes: [Int] = [15, 0],
+        parentAlertEnabled: Bool = false,
+        parentAlertDelayMinutes: Int = 0,
+        location: ChoreLocation? = nil,
         isPaused: Bool = false,
         archivedAt: Date? = nil,
         createdAt: Date = Date(),
@@ -741,6 +769,9 @@ public struct ChoreDefinition: Identifiable, Codable, Equatable, Sendable {
         self.dueTime = dueTime
         self.dueWindowMinutes = dueWindowMinutes
         self.reminderOffsetsMinutes = reminderOffsetsMinutes
+        self.parentAlertEnabled = parentAlertEnabled
+        self.parentAlertDelayMinutes = max(0, parentAlertDelayMinutes)
+        self.location = location
         self.isPaused = isPaused
         self.archivedAt = archivedAt
         self.createdAt = createdAt

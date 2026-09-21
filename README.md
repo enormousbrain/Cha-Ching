@@ -99,7 +99,21 @@ xcodebuild -project ChaChing.xcodeproj -scheme ChaChing \
   -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' build
 ```
 
-The current core suite contains 33 passing tests, and the app plus widget extension compile for the iOS Simulator.
+The current core suite contains 34 passing tests, and the app plus widget extension compile for the iOS Simulator.
+
+### Missed-Chore Alerts and Insights
+
+Parents can open a missed occurrence in Review and select **Send missed-chore alert**. This queues a normal family-scoped nudge; it does not reopen the chore, excuse it, or change deductions. The child must have notifications enabled and refresh the app (foreground or iOS-granted background refresh) to receive it. Tapping the alert opens the referenced occurrence, including a missed occurrence from an earlier day in the current period. Archived occurrences may no longer be available in the current task list.
+
+Review > Chore Insights shows misses per chore for the current allowance period. Upcoming, unresolved, excused, and future chores are excluded. Submitted/AI-reviewed chores count as attempted; rejected evidence is not treated as a missed task. A suggestion appears only with at least three observed outcomes, two misses, and a miss rate of at least 50%. **Review Schedule** opens the existing chore editor, where the parent decides whether to change the time, repeat days, or completion window. These are transparent heuristics, not AI diagnoses; there is no inferred chore-category grouping yet.
+
+### Automatic Parent Alerts
+
+Create/Edit Chore includes **Alert parent if unfinished** with options for at the due time, 15 minutes, 30 minutes, 1 hour, or 90 minutes after due. Supabase checks enabled chores every five minutes and queues one alert per occurrence while it remains upcoming or due. A submitted chore stops qualifying as unfinished; the alert does not change the deadline, missed status, or deduction.
+
+Each parent must install the current TestFlight build, enable notifications, and open the signed-in app once so their APNs token is registered. The chore setting must be synced to Supabase; the child does not need to be online at the moment the alert is sent. The parent alert is delivered through APNs to registered parent devices and can open the relevant task. The APNs key is stored only as Supabase secrets; it is not in this repository.
+
+For now, this is time-based only. Destination and departure-risk checks for location-aware pickup chores remain a separate feature because they require explicit child location permission, a destination configuration, and careful handling of delayed iOS location events.
 
 ### Quick Rewards and Savings Goals
 
@@ -289,6 +303,10 @@ supabase/functions/retention-cleanup/index.ts
 
 `delete-submission-evidence` is a parent-authorized, idempotent endpoint for one due submission. `retention-cleanup` is a secret-protected batch worker that removes due Storage objects, clears both image paths, preserves the submission audit row, and expires old invite token hashes.
 
+## Location-Aware Chores
+
+Parents can optionally assign a destination, arrival radius, and leave-ahead reminder to a chore. The destination is stored as chore configuration; the child's iPhone uses a local region notification to remind them when they arrive. Raw location is not uploaded to Supabase. iOS can delay region notifications, so the normal time-based reminder remains the fallback, and only the nearest 20 future destinations are monitored at once.
+
 Deploy both functions, apply `0013_retention_cleanup.sql`, store a generated cleanup secret in Supabase Vault, and install the 15-minute cron schedule with:
 
 ```sh
@@ -337,7 +355,7 @@ psql "postgresql://postgres:${SUPABASE_DB_PASSWORD}@db.pjvgtmxyxrfhabyuefne.supa
 
 ## Next Slices
 
-1. Accept Zoe's child invite, then smoke-test photo upload, on-device people blocking, AI review, and parent evidence viewing across two physical devices.
-2. Add APNs-backed instant sync and parent-to-child nudges.
+1. Smoke-test a location-aware chore on Zoe's physical device, including permission denial and arrival-radius behavior.
+2. Add a privacy-reviewed departure-risk alert for parents, only if the family enables it.
 3. Add a dedicated child allowance-day celebration and parent closeout review before the payment request handoff.
 4. Add orphaned-upload cleanup as a backstop for uploads interrupted before submission registration.

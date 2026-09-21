@@ -18,6 +18,10 @@ struct ParentWorkspaceView: View {
             .padding(.horizontal, 22)
             .padding(.vertical, 12)
 
+            ParentChildPicker()
+                .padding(.horizontal, 22)
+                .padding(.bottom, 8)
+
             ZStack {
                 ParentReviewQueueView()
                     .visibleParentSection(selectedTab == .review)
@@ -39,6 +43,39 @@ struct ParentWorkspaceView: View {
                 DevelopmentSessionMenu()
             }
             #endif
+        }
+    }
+}
+
+private struct ParentChildPicker: View {
+    @EnvironmentObject private var store: AppStore
+
+    var body: some View {
+        if store.isParentSession && store.childProfiles.count > 1 {
+            HStack {
+                Label("Child", systemImage: "person.2.fill")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Picker("Child", selection: Binding(
+                    get: { store.childId },
+                    set: { selectedId in
+                        Task { await store.switchParentChild(to: selectedId) }
+                    }
+                )) {
+                    ForEach(store.childProfiles) { profile in
+                        Text(profile.displayName).tag(profile.id)
+                    }
+                }
+                .pickerStyle(.menu)
+                .disabled(store.familySyncState.isWorking)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(Color.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.softGray, lineWidth: 1)
+            }
         }
     }
 }
@@ -74,6 +111,7 @@ struct ParentReviewQueueView: View {
     @State private var filter: ReviewFilter = .pending
     @State private var showingBonus = false
     @State private var showingPreviewReview = false
+    @State private var showingPreviewInsights = false
 
     private var visibleOccurrences: [TaskOccurrence] {
         switch filter {
@@ -107,6 +145,13 @@ struct ParentReviewQueueView: View {
                 }
 
                 AllowanceTrajectoryView(compact: true)
+
+                NavigationLink {
+                    ParentChoreInsightsView()
+                } label: {
+                    Label("Chore Insights", systemImage: "chart.bar.xaxis")
+                        .font(.subheadline.weight(.semibold))
+                }
 
                 Divider()
 
@@ -160,9 +205,13 @@ struct ParentReviewQueueView: View {
                 ParentTaskReviewView(occurrenceId: occurrence.id)
             }
         }
+        .navigationDestination(isPresented: $showingPreviewInsights) {
+            ParentChoreInsightsView()
+        }
         .onAppear {
             #if DEBUG
             showingPreviewReview = ProcessInfo.processInfo.environment["CHACHING_REVIEW_DETAIL"] == "1"
+            showingPreviewInsights = ProcessInfo.processInfo.environment["CHACHING_INSIGHTS"] == "1"
             #endif
         }
     }
@@ -325,6 +374,8 @@ struct ParentTaskReviewView: View {
 struct ReviewCard: View {
     @EnvironmentObject private var store: AppStore
     @State private var isSendingNudge = false
+    @State private var nudgeFeedback: String?
+    @State private var nudgeQueued = false
     var occurrence: TaskOccurrence
     var chore: ChoreDefinition
     var submission: ChoreSubmission?
@@ -390,9 +441,9 @@ struct ReviewCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if occurrence.status.isOpen {
+            if occurrence.status.isOpen || occurrence.status == .missed {
                 SecondaryActionButton(
-                    title: isSendingNudge ? "Sending" : "Nudge",
+                    title: nudgeQueued ? "Alert queued" : (isSendingNudge ? "Sending" : (occurrence.status == .missed ? "Send missed-chore alert" : "Nudge")),
                     systemImage: "bell.badge.fill",
                     tint: .sunYellow.opacity(0.7)
                 ) {
@@ -402,9 +453,18 @@ struct ReviewCard: View {
 
                     isSendingNudge = true
                     Task {
-                        await store.sendNudge(for: occurrence)
+                        let saved = await store.sendNudge(for: occurrence)
+                        nudgeQueued = saved
+                        nudgeFeedback = saved
+                            ? "Alert queued. Delivery needs notifications enabled and a sync on your child's phone."
+                            : "Alert wasn't queued. Check your connection and try again."
                         isSendingNudge = false
                     }
+                }
+                .disabled(isSendingNudge || nudgeQueued)
+                if let nudgeFeedback {
+                    Text(nudgeFeedback).font(.caption).foregroundStyle(Color.mutedGray)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -673,10 +733,68 @@ private struct EvidencePhotoViewer: View {
     }
 }
 
+struct ParentChoreInsightsView: View {
+    @EnvironmentObject private var store: AppStore
+    @State private var selectedChore: ChoreDefinition?
+
+    private var insights: [ChoreInsight] {
+        ChoreInsight.summarize(chores: store.chores, occurrences: store.occurrences,
+                              childId: store.childId)
+    }
+
+    var body: some View {
+        List {
+            Section {
+                Text(store.childName).font(.headline)
+                Text(store.allowancePeriodTitle).foregroundStyle(.secondary)
+            }
+            if insights.isEmpty {
+                ContentUnavailableView("No missed-chore patterns yet", systemImage: "checkmark.circle",
+                                       description: Text("Recorded misses will appear here during this allowance period."))
+            }
+            ForEach(insights) { insight in
+                Section(insight.title) {
+                    HStack {
+                        Label("Missed", systemImage: "clock.badge.exclamationmark")
+                        Spacer()
+                        Text("\(insight.missedCount) of \(insight.observedCount)").fontWeight(.semibold)
+                    }
+                    ProgressView(value: Double(insight.missedCount), total: Double(insight.observedCount))
+                        .tint(Color.warmOrange)
+                        .accessibilityLabel("Missed \(insight.missedCount) of \(insight.observedCount) observed chores")
+                    if insight.suggestsScheduleReview {
+                        Text("This time may be hard to fit in. Ask whether a later time, different days, or a longer completion window would help.")
+                            .font(.subheadline)
+                    } else {
+                        Text("Too few repeated misses to suggest a schedule change yet.")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                    }
+                    if let chore = store.chore(id: insight.id), chore.archivedAt == nil {
+                        Button { selectedChore = chore } label: {
+                            Label("Review Schedule", systemImage: "calendar.badge.clock")
+                        }
+                    }
+                }
+            }
+            Section {
+                Text("Based on recorded outcomes in the current allowance period. Upcoming, unresolved, and excused chores are excluded. Rejected submissions count as attempted, not missed. Suggestions need at least three observations and two misses; they never change a schedule automatically.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("Chore Insights")
+        .navigationBarTitleDisplayMode(.inline)
+        .refreshable { await store.refreshRemoteFamilyState() }
+        .sheet(item: $selectedChore) { chore in
+            EditChoreSheet(chore: chore).environmentObject(store)
+        }
+    }
+}
+
 struct ChoreManagementView: View {
     @EnvironmentObject private var store: AppStore
     @State private var selectedChore: ChoreDefinition?
     @State private var isAddingChore = false
+    @State private var isChoosingTemplates = false
 
     var body: some View {
         ScrollView {
@@ -696,6 +814,18 @@ struct ChoreManagementView: View {
                             .padding(.horizontal, 14)
                             .frame(height: 40)
                             .background(Color.sunYellow.opacity(0.72), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        isChoosingTemplates = true
+                    } label: {
+                        Label("Templates", systemImage: "square.grid.2x2")
+                            .font(.headline)
+                            .foregroundStyle(Color.inkBlack)
+                            .padding(.horizontal, 14)
+                            .frame(height: 40)
+                            .background(Color.acidLime.opacity(0.72), in: Capsule())
                     }
                     .buttonStyle(.plain)
                 }
@@ -750,6 +880,108 @@ struct ChoreManagementView: View {
         .sheet(item: $selectedChore) { chore in
             EditChoreSheet(chore: chore)
                 .environmentObject(store)
+        }
+        .sheet(isPresented: $isChoosingTemplates) {
+            ChoreTemplatePickerView()
+                .environmentObject(store)
+        }
+    }
+}
+
+struct ChoreTemplatePickerView: View {
+    @EnvironmentObject private var store: AppStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var ageGroup: ChoreTemplateAgeGroup = .ages8To10
+    @State private var selectedTemplateIDs: Set<String> = []
+    @State private var isAdding = false
+
+    private var templates: [ChoreTemplate] {
+        ChoreTemplate.forAgeGroup(ageGroup)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Picker("Age group", selection: $ageGroup) {
+                        ForEach(ChoreTemplateAgeGroup.allCases) { group in
+                            Text(group.title).tag(group)
+                        }
+                    }
+                    Text(ageGroup.note)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } header: {
+                    Text("Recommended starting points")
+                } footer: {
+                    Text("Adapt these suggestions to your child's maturity, abilities, safety needs, and your family's routine. Adult supervision is still needed for cooking, cleaning products, tools, pets, and younger children.")
+                }
+
+                Section("Choose chores") {
+                    ForEach(templates) { template in
+                        Button {
+                            toggle(template)
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: selectedTemplateIDs.contains(template.id) ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(selectedTemplateIDs.contains(template.id) ? Color.acidLime : Color.mutedGray)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(template.title)
+                                        .foregroundStyle(Color.inkBlack)
+                                    Text("\(template.recurrence.summary) · \(template.dueTime)")
+                                        .font(.caption)
+                                        .foregroundStyle(Color.mutedGray)
+                                }
+                                Spacer()
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .navigationTitle("Chore Templates")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(isAdding ? "Adding..." : "Add (selectedTemplateIDs.count)") {
+                        addSelectedTemplates()
+                    }
+                    .disabled(selectedTemplateIDs.isEmpty || isAdding)
+                }
+            }
+        }
+    }
+
+    private func toggle(_ template: ChoreTemplate) {
+        if selectedTemplateIDs.contains(template.id) {
+            selectedTemplateIDs.remove(template.id)
+        } else {
+            selectedTemplateIDs.insert(template.id)
+        }
+    }
+
+    private func addSelectedTemplates() {
+        let selected = ChoreTemplate.all.filter { selectedTemplateIDs.contains($0.id) }
+        isAdding = true
+        Task {
+            for template in selected {
+                _ = await store.addChore(
+                    title: template.title,
+                    description: template.description,
+                    instructions: template.instructions,
+                    expectedEvidence: template.expectedEvidence,
+                    deductionCents: template.deductionCents,
+                    dueTime: template.dueTime,
+                    recurrence: template.recurrence,
+                    verificationMode: .photoOptional,
+                    blockPeopleInPhotos: true
+                )
+            }
+            isAdding = false
+            dismiss()
         }
     }
 }
@@ -1899,6 +2131,15 @@ struct EditChoreSheet: View {
     @State private var oneTimeDate: Date
     @State private var verificationMode: VerificationMode
     @State private var blockPeopleInPhotos: Bool
+    @State private var parentAlertEnabled: Bool
+    @State private var parentAlertDelayMinutes: Int
+    @State private var locationEnabled: Bool
+    @State private var destinationName: String
+    @State private var destinationLatitude: Double?
+    @State private var destinationLongitude: Double?
+    @State private var destinationRadiusMeters: Double
+    @State private var destinationLeaveReminderMinutes: Int
+    @StateObject private var locationCapture = ChoreDestinationLocationCapture()
     @State private var isShowingArchiveConfirmation = false
     @State private var isSaving = false
     @State private var draftChoreId: UUID
@@ -1916,6 +2157,15 @@ struct EditChoreSheet: View {
         _oneTimeDate = State(initialValue: chore?.recurrence.oneTimeDate ?? Date())
         _verificationMode = State(initialValue: chore?.verificationMode ?? .photoOptional)
         _blockPeopleInPhotos = State(initialValue: chore?.blockPeopleInPhotos ?? true)
+        _parentAlertEnabled = State(initialValue: chore?.parentAlertEnabled ?? false)
+        _parentAlertDelayMinutes = State(initialValue: chore?.parentAlertDelayMinutes ?? 0)
+        _locationEnabled = State(initialValue: chore?.location != nil)
+        _destinationName = State(initialValue: chore?.location?.name ?? "")
+        _destinationLatitude = State(initialValue: chore?.location?.latitude)
+        _destinationLongitude = State(initialValue: chore?.location?.longitude)
+        _destinationRadiusMeters = State(initialValue: chore?.location?.radiusMeters ?? 200)
+        _destinationLeaveReminderMinutes = State(initialValue: chore?.location?.leaveReminderMinutes ?? 30)
+        _locationCapture = StateObject(wrappedValue: ChoreDestinationLocationCapture())
         _draftChoreId = State(initialValue: chore?.id ?? UUID())
     }
 
@@ -1958,6 +2208,62 @@ struct EditChoreSheet: View {
                         .lineLimit(3...6)
                     TextField("Photo guidance", text: $expectedEvidence, axis: .vertical)
                         .lineLimit(2...4)
+                }
+                Section {
+                    Toggle("Alert parent if unfinished", isOn: $parentAlertEnabled)
+                    if parentAlertEnabled {
+                        Picker("Alert after due", selection: $parentAlertDelayMinutes) {
+                            Text("At due time").tag(0)
+                            Text("15 minutes").tag(15)
+                            Text("30 minutes").tag(30)
+                            Text("1 hour").tag(60)
+                            Text("90 minutes").tag(90)
+                        }
+                    }
+                } header: {
+                    Text("Parent Alert")
+                } footer: {
+                    Text("The parent receives one alert when this occurrence is still unfinished. Submitted chores count as done. Delivery requires the parent to have notifications enabled and the child to be online recently.")
+                }
+                Section {
+                    Toggle("Location-aware chore", isOn: $locationEnabled)
+                    if locationEnabled {
+                        TextField("Destination name", text: $destinationName)
+                        Button {
+                            locationCapture.request()
+                        } label: {
+                            Label(locationCapture.isLocating ? "Finding destination..." : "Use Current Location", systemImage: "location.fill")
+                        }
+                        .disabled(locationCapture.isLocating)
+                        if let latitude = destinationLatitude, let longitude = destinationLongitude {
+                            Text("Saved at \(latitude, specifier: "%.4f"), \(longitude, specifier: "%.4f")")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("Choose the destination from the parent device before saving.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Picker("Arrival radius", selection: $destinationRadiusMeters) {
+                            Text("100 m").tag(100.0)
+                            Text("200 m").tag(200.0)
+                            Text("500 m").tag(500.0)
+                        }
+                        Picker("Leave reminder", selection: $destinationLeaveReminderMinutes) {
+                            Text("At due time").tag(0)
+                            Text("15 minutes before").tag(15)
+                            Text("30 minutes before").tag(30)
+                            Text("45 minutes before").tag(45)
+                            Text("1 hour before").tag(60)
+                        }
+                    }
+                    if let message = locationCapture.message {
+                        Text(message).font(.caption).foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text("Location Reminders")
+                } footer: {
+                    Text("The child gets a reminder when their iPhone enters this destination. Location stays on the child’s device, and iOS may delay reminders. Timed reminders remain the fallback.")
                 }
 
                 if let chore {
@@ -2039,6 +2345,14 @@ struct EditChoreSheet: View {
             } message: {
                 Text("Its completed history stays in allowance records, but it will no longer be scheduled.")
             }
+            .onChange(of: locationCapture.coordinate?.latitude) { _, _ in
+                guard let coordinate = locationCapture.coordinate else { return }
+                destinationLatitude = coordinate.latitude
+                destinationLongitude = coordinate.longitude
+                if destinationName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    destinationName = "Chore destination"
+                }
+            }
         }
     }
 
@@ -2065,7 +2379,10 @@ struct EditChoreSheet: View {
                     dueTime: dueTimeLabel,
                     recurrence: recurrence,
                     verificationMode: verificationMode,
-                    blockPeopleInPhotos: blockPeopleInPhotos
+                    blockPeopleInPhotos: blockPeopleInPhotos,
+                    parentAlertEnabled: parentAlertEnabled,
+                    parentAlertDelayMinutes: parentAlertDelayMinutes,
+                    location: selectedLocation
                 )
             } else {
                 saved = await store.addChore(
@@ -2078,7 +2395,10 @@ struct EditChoreSheet: View {
                     dueTime: dueTimeLabel,
                     recurrence: recurrence,
                     verificationMode: verificationMode,
-                    blockPeopleInPhotos: blockPeopleInPhotos
+                    blockPeopleInPhotos: blockPeopleInPhotos,
+                    parentAlertEnabled: parentAlertEnabled,
+                    parentAlertDelayMinutes: parentAlertDelayMinutes,
+                    location: selectedLocation
                 )
             }
             isSaving = false
@@ -2092,6 +2412,21 @@ struct EditChoreSheet: View {
         Money.cents(fromDollarString: deduction) == nil
             || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || (repeatFrequency == .weekly && weekdays.isEmpty)
+            || (locationEnabled && selectedLocation == nil)
+    }
+
+    private var selectedLocation: ChoreLocation? {
+        guard locationEnabled,
+              let latitude = destinationLatitude,
+              let longitude = destinationLongitude,
+              !destinationName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return ChoreLocation(
+            name: destinationName,
+            latitude: latitude,
+            longitude: longitude,
+            radiusMeters: destinationRadiusMeters,
+            leaveReminderMinutes: destinationLeaveReminderMinutes
+        )
     }
 
     private var selectedRecurrence: ChoreRecurrence {

@@ -29,6 +29,7 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
     private var armedHomeKeys: [String] = []
     private var wantsCurrentLocation = false
     private var onOpen: (([UUID]) -> Void)?
+    private var onNudge: ((UUID) -> Void)?
     @Published private(set) var home: ReminderHome?
     @Published private(set) var homeEnabled = false
     @Published private(set) var isLocating = false
@@ -46,8 +47,9 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
         location.delegate = self
     }
 
-    func configure(onOpen: @escaping ([UUID]) -> Void) {
+    func configure(onOpen: @escaping ([UUID]) -> Void, onNudge: @escaping (UUID) -> Void) {
         self.onOpen = onOpen
+        self.onNudge = onNudge
         center.delegate = self
         registerActions()
     }
@@ -154,6 +156,29 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
                                                    content: content(for: homeItems, at: now, home: true),
                                                    trigger: UNLocationNotificationTrigger(region: region, repeats: false)))
         }
+        // Region monitoring is intentionally limited to the nearest 20 destination chores.
+        // The timed reminder remains the fallback when location access is unavailable.
+        if hasLocationPermission {
+            let destinationItems = items
+                .filter { $0.location?.isValid == true && delays[$0.id]?.atHome != true }
+                .sorted { ($0.dueAt, $0.id) < ($1.dueAt, $1.id) }
+                .prefix(20)
+            for item in destinationItems {
+                guard let destination = item.location else { continue }
+                let region = CLCircularRegion(
+                    center: CLLocationCoordinate2D(latitude: destination.latitude, longitude: destination.longitude),
+                    radius: destination.radiusMeters,
+                    identifier: "chaching.destination.\(item.id)"
+                )
+                region.notifyOnEntry = true
+                region.notifyOnExit = false
+                requests.append(UNNotificationRequest(
+                    identifier: Self.prefix + "destination.\(item.id)",
+                    content: content(for: [item], at: now, home: false, destinationArrival: true),
+                    trigger: UNLocationNotificationTrigger(region: region, repeats: false)
+                ))
+            }
+        }
         let desired = Set(requests.map(\.identifier))
         center.removePendingNotificationRequests(withIdentifiers: managed.filter { !desired.contains($0.identifier) }.map(\.identifier))
         for request in requests {
@@ -177,14 +202,21 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
         nextReminderAt = batches.first?.fireAt
     }
 
-    private func content(for items: [ChoreReminderItem], at date: Date, home: Bool) -> UNMutableNotificationContent {
+    private func content(for items: [ChoreReminderItem], at date: Date, home: Bool, destinationArrival: Bool = false) -> UNMutableNotificationContent {
         let content = UNMutableNotificationContent()
         if home {
             content.title = "Welcome home"
             content.body = "Check your remaining chores for today."
+        } else if destinationArrival, let item = items.first, let destination = item.location {
+            content.title = "You're here"
+            content.body = "You're at \(destination.name). \(item.title) is due at \(item.dueAt.formatted(date: .omitted, time: .shortened))."
         } else if items.count == 1, let item = items.first {
             content.title = item.dueAt > date ? "Chore due soon" : "Chore reminder"
-            content.body = "\(item.title) · Due \(item.dueAt.formatted(date: .omitted, time: .shortened))"
+            if let destination = item.location, item.location?.leaveReminderMinutes ?? 0 > 0 {
+                content.body = "Leave for \(destination.name) soon · Due \(item.dueAt.formatted(date: .omitted, time: .shortened))"
+            } else {
+                content.body = "\(item.title) · Due \(item.dueAt.formatted(date: .omitted, time: .shortened))"
+            }
         } else {
             content.title = "\(items.count) chores need your attention"
             content.body = items.prefix(3).map(\.title).joined(separator: ", ")
@@ -198,7 +230,7 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
         content.sound = .default
         content.threadIdentifier = "chaching.chores"
         content.categoryIdentifier = homeEnabled && hasLocationPermission && !home ? Self.homeCategory : Self.category
-        content.userInfo = ["items": items.map(\.id), "owner": snapshot?.owner ?? "", "arrival": home]
+        content.userInfo = ["items": items.map(\.id), "owner": snapshot?.owner ?? "", "arrival": home, "destinationArrival": destinationArrival]
         return content
     }
 
@@ -234,6 +266,11 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
         }
         save(delays, "delays")
         do { try await schedule() } catch { message = error.localizedDescription }
+    }
+
+    private func openNudge(occurrenceId: String, owner: String) {
+        guard snapshot?.owner == owner, let id = UUID(uuidString: occurrenceId) else { return }
+        onNudge?(id)
     }
 
     var hasLocationPermission: Bool {
@@ -293,8 +330,12 @@ struct ReminderChoreListView: View {
     @Environment(\.dismiss) private var dismiss
 
     private var chores: [TaskOccurrence] {
-        store.todayOccurrences.filter { occurrence in
-            occurrence.status.isOpen && (store.reminderChoreIds?.contains(occurrence.choreDefinitionId) == true)
+        if let id = store.reminderOccurrenceId {
+            return store.occurrences.filter { $0.id == id }
+        }
+        return store.todayOccurrences.filter { occurrence in
+            (occurrence.status.isOpen || occurrence.status == .missed)
+                && (store.reminderChoreIds?.contains(occurrence.choreDefinitionId) == true)
         }
     }
 
@@ -332,6 +373,10 @@ extension ChoreReminderCenter: UNUserNotificationCenterDelegate {
         let owner = info["owner"] as? String ?? ""
         let arrival = info["arrival"] as? Bool ?? false
         let action = response.actionIdentifier
+        if info["kind"] as? String == "task_nudge", action == UNNotificationDefaultActionIdentifier {
+            await openNudge(occurrenceId: info["task_occurrence_id"] as? String ?? "", owner: owner)
+            return
+        }
         await respond(action: action, keys: keys, owner: owner, arrival: arrival)
     }
 
@@ -380,6 +425,71 @@ extension ChoreReminderCenter: CLLocationManagerDelegate {
             wantsCurrentLocation = false
             isLocating = false
             message = description
+        }
+    }
+}
+
+@MainActor
+final class ChoreDestinationLocationCapture: NSObject, ObservableObject {
+    @Published private(set) var isLocating = false
+    @Published private(set) var coordinate: CLLocationCoordinate2D?
+    @Published private(set) var message: String?
+
+    private let manager = CLLocationManager()
+
+    override init() {
+        super.init()
+        manager.delegate = self
+    }
+
+    func request() {
+        message = nil
+        isLocating = true
+        switch manager.authorizationStatus {
+        case .notDetermined:
+            manager.requestWhenInUseAuthorization()
+        case .authorizedAlways, .authorizedWhenInUse:
+            manager.requestLocation()
+        default:
+            isLocating = false
+            message = "Allow location access in Settings to use the current place."
+        }
+    }
+}
+
+extension ChoreDestinationLocationCapture: CLLocationManagerDelegate {
+    nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        let status = manager.authorizationStatus
+        Task { @MainActor in
+            guard self.isLocating else { return }
+            if status == .authorizedAlways || status == .authorizedWhenInUse {
+                self.manager.requestLocation()
+            } else if status != .notDetermined {
+                self.isLocating = false
+                self.message = "Location access is off. You can still use timed reminders."
+            }
+        }
+    }
+
+    nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let fix = locations.last else { return }
+        let coordinate = fix.coordinate
+        let accuracy = fix.horizontalAccuracy
+        let age = abs(fix.timestamp.timeIntervalSinceNow)
+        Task { @MainActor in
+            self.isLocating = false
+            guard accuracy >= 0, accuracy <= 200, age < 120 else {
+                self.message = "Couldn't get an accurate location. Try again."
+                return
+            }
+            self.coordinate = coordinate
+        }
+    }
+
+    nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        Task { @MainActor in
+            self.isLocating = false
+            self.message = error.localizedDescription
         }
     }
 }

@@ -189,6 +189,13 @@ struct ChoreDefinitionRecord: Codable, Identifiable, Sendable {
     let recurrence: RecurrencePayload
     let dueWindowMinutes: Int
     let reminderOffsetsMinutes: [Int]
+    let parentAlertEnabled: Bool
+    let parentAlertDelayMinutes: Int
+    let locationName: String?
+    let locationLatitude: Double?
+    let locationLongitude: Double?
+    let locationRadiusMeters: Double?
+    let locationLeaveReminderMinutes: Int?
     let isPaused: Bool
     let archivedAt: Date?
     let createdAt: Date
@@ -211,6 +218,13 @@ struct ChoreDefinitionRecord: Codable, Identifiable, Sendable {
         case recurrence
         case dueWindowMinutes = "due_window_minutes"
         case reminderOffsetsMinutes = "reminder_offsets_minutes"
+        case parentAlertEnabled = "parent_alert_enabled"
+        case parentAlertDelayMinutes = "parent_alert_delay_minutes"
+        case locationName = "location_name"
+        case locationLatitude = "location_latitude"
+        case locationLongitude = "location_longitude"
+        case locationRadiusMeters = "location_radius_meters"
+        case locationLeaveReminderMinutes = "location_leave_reminder_minutes"
         case isPaused = "is_paused"
         case archivedAt = "archived_at"
         case createdAt = "created_at"

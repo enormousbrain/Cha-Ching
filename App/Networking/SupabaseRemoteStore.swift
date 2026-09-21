@@ -165,6 +165,26 @@ struct SupabaseRemoteStore: Sendable {
             .value
     }
 
+    func upsertAPNsDeviceToken(familyId: UUID, token: String, environment: String) async throws {
+        struct Payload: Encodable {
+            let userId: UUID
+            let familyId: UUID
+            let token: String
+            let environment: String
+            let lastSeenAt: String
+            enum CodingKeys: String, CodingKey {
+                case userId = "user_id"
+                case familyId = "family_id"
+                case token, environment
+                case lastSeenAt = "last_seen_at"
+            }
+        }
+        let session = try await currentSession()
+        let payload = Payload(userId: session.user.id, familyId: familyId, token: token,
+                              environment: environment, lastSeenAt: iso8601String(from: Date()))
+        try await client.from("apns_device_tokens").upsert(payload, onConflict: "user_id,token").execute()
+    }
+
     func bootstrapPreviewFamily(
         parentName: String,
         childName: String,
@@ -418,6 +438,13 @@ struct SupabaseRemoteStore: Sendable {
             recurrence: recurrencePayload(for: chore),
             dueWindowMinutes: chore.dueWindowMinutes,
             reminderOffsetsMinutes: chore.reminderOffsetsMinutes,
+            parentAlertEnabled: chore.parentAlertEnabled,
+            parentAlertDelayMinutes: chore.parentAlertDelayMinutes,
+            locationName: chore.location?.name,
+            locationLatitude: chore.location?.latitude,
+            locationLongitude: chore.location?.longitude,
+            locationRadiusMeters: chore.location?.radiusMeters,
+            locationLeaveReminderMinutes: chore.location?.leaveReminderMinutes,
             isPaused: chore.isPaused
         )
 
@@ -441,7 +468,10 @@ struct SupabaseRemoteStore: Sendable {
         dueTime: String,
         recurrence: ChoreRecurrence,
         verificationMode: VerificationMode,
-        blockPeopleInPhotos: Bool?
+        blockPeopleInPhotos: Bool?,
+        parentAlertEnabled: Bool,
+        parentAlertDelayMinutes: Int,
+        location: ChoreLocation?
     ) async throws -> ChoreDefinitionRecord {
         let payload = ChoreDefinitionUpdate(
             title: title,
@@ -452,7 +482,14 @@ struct SupabaseRemoteStore: Sendable {
             deductionCents: deductionCents,
             verificationMode: verificationMode.rawValue,
             blockPeopleInPhotos: blockPeopleInPhotos,
-            recurrence: recurrencePayload(for: recurrence, dueTime: dueTime)
+            recurrence: recurrencePayload(for: recurrence, dueTime: dueTime),
+            parentAlertEnabled: parentAlertEnabled,
+            parentAlertDelayMinutes: parentAlertDelayMinutes,
+            locationName: location?.name,
+            locationLatitude: location?.latitude,
+            locationLongitude: location?.longitude,
+            locationRadiusMeters: location?.radiusMeters,
+            locationLeaveReminderMinutes: location?.leaveReminderMinutes
         )
 
         return try await client
@@ -926,6 +963,13 @@ private struct ChoreDefinitionUpdate: Encodable {
     let verificationMode: String
     let blockPeopleInPhotos: Bool?
     let recurrence: RecurrencePayload
+    let parentAlertEnabled: Bool
+    let parentAlertDelayMinutes: Int
+    let locationName: String?
+    let locationLatitude: Double?
+    let locationLongitude: Double?
+    let locationRadiusMeters: Double?
+    let locationLeaveReminderMinutes: Int?
 
     enum CodingKeys: String, CodingKey {
         case title
@@ -937,6 +981,13 @@ private struct ChoreDefinitionUpdate: Encodable {
         case verificationMode = "verification_mode"
         case blockPeopleInPhotos = "block_people_in_photos"
         case recurrence
+        case parentAlertEnabled = "parent_alert_enabled"
+        case parentAlertDelayMinutes = "parent_alert_delay_minutes"
+        case locationName = "location_name"
+        case locationLatitude = "location_latitude"
+        case locationLongitude = "location_longitude"
+        case locationRadiusMeters = "location_radius_meters"
+        case locationLeaveReminderMinutes = "location_leave_reminder_minutes"
     }
 }
 
@@ -955,6 +1006,13 @@ private struct ChoreDefinitionInsert: Encodable {
     let recurrence: RecurrencePayload
     let dueWindowMinutes: Int
     let reminderOffsetsMinutes: [Int]
+    let parentAlertEnabled: Bool
+    let parentAlertDelayMinutes: Int
+    let locationName: String?
+    let locationLatitude: Double?
+    let locationLongitude: Double?
+    let locationRadiusMeters: Double?
+    let locationLeaveReminderMinutes: Int?
     let isPaused: Bool
 
     enum CodingKeys: String, CodingKey {
@@ -973,6 +1031,13 @@ private struct ChoreDefinitionInsert: Encodable {
         case dueWindowMinutes = "due_window_minutes"
         case reminderOffsetsMinutes = "reminder_offsets_minutes"
         case isPaused = "is_paused"
+        case parentAlertEnabled = "parent_alert_enabled"
+        case parentAlertDelayMinutes = "parent_alert_delay_minutes"
+        case locationName = "location_name"
+        case locationLatitude = "location_latitude"
+        case locationLongitude = "location_longitude"
+        case locationRadiusMeters = "location_radius_meters"
+        case locationLeaveReminderMinutes = "location_leave_reminder_minutes"
     }
 }
 

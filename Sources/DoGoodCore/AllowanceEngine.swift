@@ -1,5 +1,34 @@
 import Foundation
 
+public struct ChoreInsight: Identifiable, Equatable, Sendable {
+    public var id: UUID
+    public var title: String
+    public var missedCount: Int
+    public var observedCount: Int
+    public var suggestsScheduleReview: Bool {
+        observedCount >= 3 && missedCount >= 2 && missedCount * 2 >= observedCount
+    }
+
+    public static func summarize(chores: [ChoreDefinition], occurrences: [TaskOccurrence],
+                                 childId: UUID, now: Date = Date()) -> [ChoreInsight] {
+        let unique = Dictionary(grouping: occurrences, by: \.id).compactMap { _, values in
+            values.max { $0.updatedAt < $1.updatedAt }
+        }
+        return chores.filter { $0.childId == childId }.compactMap { chore in
+            let observed = unique.filter {
+                $0.childId == childId && $0.choreDefinitionId == chore.id && $0.dueAt <= now
+                    && [.missed, .approved, .submitted, .aiReviewed, .rejected].contains($0.status)
+            }
+            let missed = observed.filter { $0.status == .missed }.count
+            guard missed > 0 else { return nil }
+            return ChoreInsight(id: chore.id, title: chore.title, missedCount: missed, observedCount: observed.count)
+        }.sorted {
+            if $0.missedCount != $1.missedCount { return $0.missedCount > $1.missedCount }
+            return $0.id.uuidString < $1.id.uuidString
+        }
+    }
+}
+
 public enum MutationPersistenceMode: Equatable, Sendable {
     case localPreview
     case remoteRequired
