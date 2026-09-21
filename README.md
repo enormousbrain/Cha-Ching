@@ -99,7 +99,15 @@ xcodebuild -project ChaChing.xcodeproj -scheme ChaChing \
   -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' build
 ```
 
-The current core suite contains 32 passing tests, and the app plus widget extension compile for the iOS Simulator.
+The current core suite contains 33 passing tests, and the app plus widget extension compile for the iOS Simulator.
+
+### Quick Rewards and Savings Goals
+
+Parent Earnings > Add Bonus offers five one-tap rewards ($1-$5), plus the existing custom form. Each shortcut displays its amount and records a normal bonus ledger entry using the existing remote-save and duplicate-ID protections.
+
+Children can add, rename, change the target amount, and remove up to five savings goals from Earnings. Parents see the selected child's goals. Goals describe intentions, not a tracked savings balance: allowance payouts are not automatically allocated to them. Child reminders rotate between active goals by day; deleting every goal restores ordinary wording. Goal names may appear on the Lock Screen according to the phone's notification-preview settings.
+
+Apply `supabase/migrations/0017_savings_goals.sql` before testing goal saves remotely. The migration adds an optional-to-older-clients profile field and a restricted RPC that permits only the linked child to save their goals. Existing family profile read policies apply; no broader child profile update permissions are granted.
 
 ### Snooze and Arrival Reminders
 

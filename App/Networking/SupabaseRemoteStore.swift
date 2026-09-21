@@ -5,6 +5,14 @@ import Supabase
 struct SupabaseRemoteStore: Sendable {
     var client: SupabaseClient = SupabaseClientProvider.shared
 
+    func saveSavingsGoals(childId: UUID, goals: [SavingsGoal]) async throws {
+        struct Parameters: Encodable {
+            var target_child_id: UUID
+            var goals: [SavingsGoal]
+        }
+        try await client.rpc("set_child_savings_goals", params: Parameters(target_child_id: childId, goals: goals)).execute()
+    }
+
     func currentSession() async throws -> Session {
         let session = try await client.auth.session
         client.functions.setAuth(token: session.accessToken)

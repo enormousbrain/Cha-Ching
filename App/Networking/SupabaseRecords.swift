@@ -65,6 +65,7 @@ struct WeekRecord: Codable, Identifiable, Sendable {
 }
 
 struct ChildProfileRecord: Codable, Identifiable, Sendable {
+    var savingsGoals: [SavingsGoal]? = nil
     let id: UUID
     let familyId: UUID
     let displayName: String
@@ -75,6 +76,7 @@ struct ChildProfileRecord: Codable, Identifiable, Sendable {
     let updatedAt: Date
 
     enum CodingKeys: String, CodingKey {
+        case savingsGoals = "savings_goals"
         case id
         case familyId = "family_id"
         case displayName = "display_name"

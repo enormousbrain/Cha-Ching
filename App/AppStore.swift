@@ -31,6 +31,7 @@ final class AppStore: ObservableObject {
     @Published var evidencePolicy: FamilyEvidencePolicy
     @Published var notificationState: NotificationState
     @Published var reminderChoreIds: [UUID]?
+    @Published private(set) var savingsGoals: [SavingsGoal] = []
     @Published var familySyncState: FamilySyncState
     @Published var mutationFailure: MutationFailure?
     @Published private(set) var activeMutationTitle: String?
@@ -944,6 +945,7 @@ final class AppStore: ObservableObject {
         amountCents: Int,
         note: String?
     ) async -> Bool {
+        guard isParentSession, amountCents > 0, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
         let entry = LedgerEntry(
             id: id,
             weekId: weekId,
@@ -969,6 +971,18 @@ final class AppStore: ObservableObject {
             },
             localCommit: {
                 ledger.append(entry)
+                publishWidgetSnapshot()
+            }
+        )
+    }
+
+    func saveSavingsGoals(_ goals: [SavingsGoal]) async -> Bool {
+        guard isChildSession, goals.count <= 5, goals.allSatisfy(\.isValid) else { return false }
+        return await commitMutation(
+            actionTitle: "Save savings goals", successMessage: "Savings goals saved.",
+            remoteSave: { try await remoteStore.saveSavingsGoals(childId: childId, goals: goals) },
+            localCommit: {
+                savingsGoals = goals
                 publishWidgetSnapshot()
             }
         )
@@ -1147,7 +1161,8 @@ final class AppStore: ObservableObject {
 
     private func updateChoreReminders() {
         let items = ChoreReminderPlanner.items(chores: chores, occurrences: occurrences, childId: childId, now: Date())
-        ChoreReminderCenter.shared.update(owner: "\(session.userId).\(familyId).\(childId)", items: items)
+        ChoreReminderCenter.shared.update(owner: "\(session.userId).\(familyId).\(childId)", items: items,
+                                         goals: isChildSession ? savingsGoals : [])
     }
 
     private func processPendingTaskNudges(familyId: UUID, childId: UUID) async {
@@ -1452,6 +1467,7 @@ final class AppStore: ObservableObject {
     }
 
     private func applyLocalPreviewState() {
+        savingsGoals = []
         let snapshot = SeedData.snapshot()
         familyId = snapshot.familyId
         parentId = snapshot.parentId
@@ -1536,6 +1552,7 @@ final class AppStore: ObservableObject {
         weekId = weekRecord.id
         familyName = familyRecord.name
         childName = selectedChildProfile.displayName
+        savingsGoals = selectedChildProfile.savingsGoals ?? []
 
         let parentMember = memberRecords.first { $0.role == FamilyMemberRole.parent.rawValue }
         parentId = parentMember?.userId ?? (role == .parent ? authUserId : parentId)

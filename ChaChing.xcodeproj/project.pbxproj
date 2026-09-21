@@ -7,8 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		D00D000000000000000000A0 /* ChoreReminderPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00D000000000000000000A1 /* ChoreReminderPlanner.swift */; };
-		D00D000000000000000000A2 /* ChoreReminderCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00D000000000000000000A3 /* ChoreReminderCenter.swift */; };
 		D00D00000000000000000013 /* ChaChingApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00D00000000000000000012 /* ChaChingApp.swift */; };
 		D00D00000000000000000015 /* AppStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00D00000000000000000014 /* AppStore.swift */; };
 		D00D00000000000000000019 /* DesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00D00000000000000000018 /* DesignSystem.swift */; };
@@ -34,6 +32,8 @@
 		D00D00000000000000000070 /* WidgetSharedState.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00D00000000000000000072 /* WidgetSharedState.swift */; };
 		D00D00000000000000000071 /* WidgetSharedState.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00D00000000000000000072 /* WidgetSharedState.swift */; };
 		D00D00000000000000000076 /* PhotoPrivacyScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00D00000000000000000075 /* PhotoPrivacyScanner.swift */; };
+		D00D000000000000000000A0 /* ChoreReminderPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00D000000000000000000A1 /* ChoreReminderPlanner.swift */; };
+		D00D000000000000000000A2 /* ChoreReminderCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00D000000000000000000A3 /* ChoreReminderCenter.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -61,8 +61,6 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		D00D000000000000000000A1 /* ChoreReminderPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChoreReminderPlanner.swift; sourceTree = "<group>"; };
-		D00D000000000000000000A3 /* ChoreReminderCenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChoreReminderCenter.swift; sourceTree = "<group>"; };
 		D00D00000000000000000005 /* ChaChing.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ChaChing.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D00D00000000000000000010 /* AppBrand.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = AppBrand.xcconfig; sourceTree = "<group>"; };
 		D00D00000000000000000012 /* ChaChingApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChaChingApp.swift; sourceTree = "<group>"; };
@@ -96,6 +94,8 @@
 		D00D00000000000000000072 /* WidgetSharedState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetSharedState.swift; sourceTree = "<group>"; };
 		D00D00000000000000000074 /* ChaChingWidgets.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ChaChingWidgets.entitlements; sourceTree = "<group>"; };
 		D00D00000000000000000075 /* PhotoPrivacyScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoPrivacyScanner.swift; sourceTree = "<group>"; };
+		D00D000000000000000000A1 /* ChoreReminderPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChoreReminderPlanner.swift; sourceTree = "<group>"; };
+		D00D000000000000000000A3 /* ChoreReminderCenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChoreReminderCenter.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */

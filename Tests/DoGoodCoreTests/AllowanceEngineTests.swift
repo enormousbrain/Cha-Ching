@@ -2,6 +2,16 @@ import XCTest
 @testable import DoGoodCore
 
 final class AllowanceEngineTests: XCTestCase {
+    func testSavingsGoalValidationAndRoundTrip() throws {
+        let goal = SavingsGoal(title: "A bike", targetCents: 15000)
+        XCTAssertTrue(goal.isValid)
+        XCTAssertEqual(try JSONDecoder().decode(SavingsGoal.self, from: JSONEncoder().encode(goal)), goal)
+        XCTAssertFalse(SavingsGoal(title: " ", targetCents: 15000).isValid)
+        XCTAssertFalse(SavingsGoal(title: "Bike", targetCents: 0).isValid)
+        XCTAssertFalse(SavingsGoal(title: "Bike", targetCents: -1).isValid)
+        XCTAssertFalse(SavingsGoal(title: String(repeating: "x", count: 61), targetCents: 100).isValid)
+        XCTAssertFalse(SavingsGoal(title: "Bike", targetCents: 100_000_001).isValid)
+    }
     func testTrajectoryTracksBonusesDeductionsAndDebtWithoutClamping() {
         let start = Date(timeIntervalSince1970: 1000)
         let week = UUID()

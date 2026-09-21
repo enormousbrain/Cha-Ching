@@ -5,6 +5,7 @@ struct EarningsView: View {
     @EnvironmentObject private var store: AppStore
     var allowsBonusActions: Bool = false
     @State private var showingBonusSheet = false
+    @State private var showingGoalsSheet = false
     @State private var showingMessageComposer = false
     @State private var selectedSection: EarningsSection
 
@@ -17,6 +18,10 @@ struct EarningsView: View {
 
     init(allowsBonusActions: Bool = false) {
         self.allowsBonusActions = allowsBonusActions
+        #if DEBUG
+        _showingBonusSheet = State(initialValue: ProcessInfo.processInfo.environment["CHACHING_BONUS_SHEET"] == "1")
+        _showingGoalsSheet = State(initialValue: ProcessInfo.processInfo.environment["CHACHING_GOALS_SHEET"] == "1")
+        #endif
         let launchSection = ProcessInfo.processInfo.environment["CHACHING_EARNINGS_SECTION"]
         _selectedSection = State(
             initialValue: launchSection == "history" ? .history : .current
@@ -49,6 +54,9 @@ struct EarningsView: View {
             AddBonusSheet()
                 .environmentObject(store)
         }
+        .sheet(isPresented: $showingGoalsSheet) {
+            SavingsGoalsSheet(goals: store.savingsGoals).environmentObject(store)
+        }
         .sheet(isPresented: $showingMessageComposer) {
             MessageComposerView(body: store.allowanceRequestMessage)
         }
@@ -66,6 +74,30 @@ struct EarningsView: View {
             PeriodDateRange(period: period)
             AllowanceTrajectoryView()
             AllowanceSummaryRows(summary: store.allowanceSummary)
+
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text(allowsBonusActions ? "\(store.childName)'s Goals" : "Saving For").font(.headline)
+                    Spacer()
+                    if !allowsBonusActions {
+                        Button { showingGoalsSheet = true } label: {
+                            Image(systemName: store.savingsGoals.isEmpty ? "plus.circle" : "pencil")
+                        }
+                        .accessibilityLabel("Edit savings goals")
+                    }
+                }
+                ForEach(store.savingsGoals) { goal in
+                    HStack {
+                        Image(systemName: "target").foregroundStyle(Color.hotPink)
+                        Text(goal.title)
+                        Spacer()
+                        Text(Money.dollars(goal.targetCents)).fontWeight(.semibold)
+                    }
+                }
+                if store.savingsGoals.isEmpty {
+                    Text("No savings goals yet").foregroundStyle(.secondary)
+                }
+            }
 
             if !allowsBonusActions {
                 AllowanceRequestCard(
@@ -691,7 +723,15 @@ struct AddBonusSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section {
+                Section("Quick Rewards") {
+                    quickReward("Helped without being asked", cents: 200, icon: "hand.raised.fill")
+                    quickReward("Extra effort", cents: 300, icon: "star.fill")
+                    quickReward("Showed kindness", cents: 100, icon: "heart.fill")
+                    quickReward("Took on an extra chore", cents: 200, icon: "checkmark.circle.fill")
+                    quickReward("A great week", cents: 500, icon: "trophy.fill")
+                }
+                .disabled(isSaving)
+                Section("Custom Reward") {
                     TextField("Title", text: $title)
                     TextField("Amount", text: $amount)
                         .keyboardType(.decimalPad)
@@ -730,9 +770,98 @@ struct AddBonusSheet: View {
                             }
                         }
                     }
-                    .disabled(isSaving)
+                    .disabled(isSaving || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (Money.cents(fromDollarString: amount) ?? 0) <= 0)
                 }
             }
         }
     }
+
+    private func quickReward(_ title: String, cents: Int, icon: String) -> some View {
+        Button {
+            isSaving = true
+            Task {
+                let saved = await store.addBonus(id: entryId, title: title, amountCents: cents, note: nil)
+                isSaving = false
+                if saved { dismiss() }
+            }
+        } label: {
+            HStack {
+                Label(title, systemImage: icon)
+                Spacer()
+                Text(Money.dollars(cents, signed: true)).fontWeight(.semibold)
+            }
+        }
+    }
+}
+
+struct SavingsGoalsSheet: View {
+    @EnvironmentObject private var store: AppStore
+    @Environment(\.dismiss) private var dismiss
+    @State var goals: [SavingsGoal]
+    @State private var title = ""
+    @State private var amount = ""
+    @State private var isSaving = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if !goals.isEmpty {
+                  Section("Saving For") {
+                    ForEach($goals) { $goal in
+                        VStack(alignment: .leading) {
+                            TextField("Goal", text: $goal.title)
+                            TextField("Target amount", value: Binding(
+                                get: { Double(goal.targetCents) / 100 },
+                                set: { goal.targetCents = Int((min(1_000_001, max(0, $0)) * 100).rounded()) }
+                            ), format: .number.precision(.fractionLength(0...2)))
+                            .keyboardType(.decimalPad)
+                            .accessibilityLabel("Target amount in dollars")
+                        }
+                    }
+                    .onDelete { goals.remove(atOffsets: $0) }
+                  }
+                }
+                if goals.count < 5 {
+                    Section("New Goal") {
+                        TextField("A bike, a game, a day out...", text: $title)
+                        TextField("Target amount", text: $amount).keyboardType(.decimalPad)
+                        Button("Add Goal", systemImage: "plus") {
+                            guard let cents = Money.cents(fromDollarString: amount) else { return }
+                            goals.append(SavingsGoal(title: title.trimmingCharacters(in: .whitespacesAndNewlines), targetCents: cents))
+                            title = ""
+                            amount = ""
+                        }
+                        .disabled(!newGoalIsValid)
+                    }
+                }
+                if isSaving { ProgressView("Saving goals...") }
+            }
+            .disabled(isSaving)
+            .navigationTitle("Savings Goals")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(isSaving) }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        var updatedGoals = goals
+                        if hasDraft, let cents = Money.cents(fromDollarString: amount) {
+                            updatedGoals.append(SavingsGoal(title: title.trimmingCharacters(in: .whitespacesAndNewlines), targetCents: cents))
+                        }
+                        isSaving = true
+                        Task {
+                            if await store.saveSavingsGoals(updatedGoals) { dismiss() }
+                            isSaving = false
+                        }
+                    }
+                    .disabled(isSaving || !goals.allSatisfy(\.isValid) || (hasDraft && (!newGoalIsValid || goals.count >= 5)))
+                }
+            }
+        }
+    }
+
+    private var newGoalIsValid: Bool {
+        SavingsGoal(title: title, targetCents: Money.cents(fromDollarString: amount) ?? 0).isValid
+    }
+
+    private var hasDraft: Bool { !title.isEmpty || !amount.isEmpty }
 }

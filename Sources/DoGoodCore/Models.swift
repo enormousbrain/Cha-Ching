@@ -1,5 +1,22 @@
 import Foundation
 
+public struct SavingsGoal: Codable, Identifiable, Equatable, Sendable {
+    public var id: UUID
+    public var title: String
+    public var targetCents: Int
+
+    public init(id: UUID = UUID(), title: String, targetCents: Int) {
+        self.id = id
+        self.title = title
+        self.targetCents = targetCents
+    }
+
+    public var isValid: Bool {
+        !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && title.count <= 60
+            && targetCents > 0 && targetCents <= 100_000_000
+    }
+}
+
 public enum FamilyMemberRole: String, Codable, CaseIterable, Identifiable, Sendable {
     case parent
     case child

@@ -5,6 +5,7 @@ import UserNotifications
 private struct ReminderSnapshot: Codable {
     var owner: String
     var items: [ChoreReminderItem]
+    var goals: [SavingsGoal]? = nil
 }
 
 struct ReminderHome: Codable {
@@ -51,8 +52,8 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
         registerActions()
     }
 
-    func update(owner: String, items: [ChoreReminderItem]) {
-        if snapshot?.owner != owner || snapshot?.items != items { revision += 1 }
+    func update(owner: String, items: [ChoreReminderItem], goals: [SavingsGoal] = []) {
+        if snapshot?.owner != owner || snapshot?.items != items || snapshot?.goals != goals { revision += 1 }
         if let snapshot, snapshot.owner != owner {
             setArmedHomeKeys([])
             delays = [:]
@@ -60,7 +61,7 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
             homeEnabled = false
             persistHome()
         }
-        snapshot = ReminderSnapshot(owner: owner, items: items)
+        snapshot = ReminderSnapshot(owner: owner, items: items, goals: goals)
         let ids = Set(items.map(\.id))
         delays = delays.filter { ids.contains($0.key) }
         save(snapshot, "snapshot")
@@ -187,6 +188,12 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
         } else {
             content.title = "\(items.count) chores need your attention"
             content.body = items.prefix(3).map(\.title).joined(separator: ", ")
+        }
+        let goals = (snapshot?.goals ?? []).filter(\.isValid)
+        if !goals.isEmpty {
+            let index = Calendar.current.ordinality(of: .day, in: .era, for: date) ?? 0
+            let goal = goals[index % goals.count]
+            content.body += " Saving for \(goal.title) (\(Money.dollars(goal.targetCents)))? Every good habit counts."
         }
         content.sound = .default
         content.threadIdentifier = "chaching.chores"
