@@ -30,6 +30,8 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Use the camera to submit chore evidence photos for parent review.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Save your home on this iPhone so you can choose to receive chore reminders when you arrive home.</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UIBackgroundModes</key>

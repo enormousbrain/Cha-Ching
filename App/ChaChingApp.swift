@@ -9,6 +9,9 @@ struct ChaChingApp: App {
     init() {
         let store = AppStore()
         _store = StateObject(wrappedValue: store)
+        ChoreReminderCenter.shared.configure { [weak store] choreIds in
+            store?.reminderChoreIds = choreIds
+        }
         ChaChingBackgroundRefresh.shared.configure(store: store)
     }
 

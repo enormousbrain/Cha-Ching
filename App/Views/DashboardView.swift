@@ -2,7 +2,7 @@ import SwiftUI
 
 struct DashboardView: View {
     @EnvironmentObject private var store: AppStore
-    @State private var isShowingNotificationStatus = false
+    @State private var isShowingReminderSettings = false
 
     var body: some View {
         ScrollView {
@@ -64,10 +64,7 @@ struct DashboardView: View {
                 RemoteRefreshButton()
 
                 Button {
-                    Task {
-                        await store.enableLocalNotifications()
-                        isShowingNotificationStatus = true
-                    }
+                    isShowingReminderSettings = true
                 } label: {
                     Image(systemName: "bell")
                         .font(.headline)
@@ -75,11 +72,9 @@ struct DashboardView: View {
                 .accessibilityLabel("Notifications")
             }
         }
-        .alert("Reminders", isPresented: $isShowingNotificationStatus) {
-            Button("OK", role: .cancel) {
-            }
-        } message: {
-            Text(store.notificationState.message)
+        .sheet(isPresented: $isShowingReminderSettings) {
+            ReminderSettingsView()
+                .environmentObject(store)
         }
     }
 

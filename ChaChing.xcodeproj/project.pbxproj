@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		D00D000000000000000000A0 /* ChoreReminderPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00D000000000000000000A1 /* ChoreReminderPlanner.swift */; };
+		D00D000000000000000000A2 /* ChoreReminderCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00D000000000000000000A3 /* ChoreReminderCenter.swift */; };
 		D00D00000000000000000013 /* ChaChingApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00D00000000000000000012 /* ChaChingApp.swift */; };
 		D00D00000000000000000015 /* AppStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00D00000000000000000014 /* AppStore.swift */; };
 		D00D00000000000000000019 /* DesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00D00000000000000000018 /* DesignSystem.swift */; };
@@ -59,6 +61,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		D00D000000000000000000A1 /* ChoreReminderPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChoreReminderPlanner.swift; sourceTree = "<group>"; };
+		D00D000000000000000000A3 /* ChoreReminderCenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChoreReminderCenter.swift; sourceTree = "<group>"; };
 		D00D00000000000000000005 /* ChaChing.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ChaChing.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D00D00000000000000000010 /* AppBrand.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = AppBrand.xcconfig; sourceTree = "<group>"; };
 		D00D00000000000000000012 /* ChaChingApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChaChingApp.swift; sourceTree = "<group>"; };
@@ -150,6 +154,7 @@
 			children = (
 				D00D00000000000000000012 /* ChaChingApp.swift */,
 				D00D00000000000000000014 /* AppStore.swift */,
+				D00D000000000000000000A3 /* ChoreReminderCenter.swift */,
 				D00D00000000000000000016 /* Info.plist */,
 				D00D0000000000000000004E /* ChaChing.entitlements */,
 				D00D00000000000000000051 /* Assets.xcassets */,
@@ -196,6 +201,7 @@
 				D00D0000000000000000002B /* Money.swift */,
 				D00D0000000000000000002D /* Models.swift */,
 				D00D0000000000000000002F /* AllowanceEngine.swift */,
+				D00D000000000000000000A1 /* ChoreReminderPlanner.swift */,
 				D00D00000000000000000031 /* SeedData.swift */,
 				D00D00000000000000000075 /* PhotoPrivacyScanner.swift */,
 			);
@@ -370,6 +376,8 @@
 			files = (
 				D00D00000000000000000013 /* ChaChingApp.swift in Sources */,
 				D00D00000000000000000015 /* AppStore.swift in Sources */,
+				D00D000000000000000000A0 /* ChoreReminderPlanner.swift in Sources */,
+				D00D000000000000000000A2 /* ChoreReminderCenter.swift in Sources */,
 				D00D00000000000000000019 /* DesignSystem.swift in Sources */,
 				D00D0000000000000000001C /* RootView.swift in Sources */,
 				D00D0000000000000000001E /* DashboardView.swift in Sources */,

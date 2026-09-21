@@ -99,7 +99,22 @@ xcodebuild -project ChaChing.xcodeproj -scheme ChaChing \
   -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' build
 ```
 
-The current core suite contains 24 passing tests, and the app plus widget extension compile for the iOS Simulator.
+The current core suite contains 32 passing tests, and the app plus widget extension compile for the iOS Simulator.
+
+### Snooze and Arrival Reminders
+
+The child's Today bell opens Reminders settings. Enable notifications there; expand a chore notification to choose Snooze 15 min or Snooze 1 hour. Alerts sharing a minute are combined. Snoozes persist on the phone across app launches and syncs, and do not alter deadlines, grace windows, or allowance deductions. Reminders stop when the app learns that an occurrence is submitted, completed, excused, or otherwise closed; future occurrences still receive reminders.
+
+Scheduling uses a rolling 14-day window with up to 56 timed alerts, replenished during foreground and best-effort background refresh. A phone that does not refresh can eventually exhaust that window or show an alert based on older cached state. This is not server push delivery.
+
+While physically at home, use **Use Current Location as Home** to enable the optional **When I get home** notification action. The coordinate and deferred reminders stay in local app storage and are not sent to Supabase. iOS handles a one-time arrival trigger with a 200-meter region and When In Use permission; delivery can be delayed. Disabling arrival reminders restores future timed reminders. Arrival reminders do not excuse lateness, and stale arrivals are reconciled on the next refresh.
+
+Physical-device QA after the next TestFlight upload:
+1. Enable notifications on Zoe's phone; expand an upcoming alert and snooze it. Confirm only one reminder appears at the new time.
+2. Submit the chore before the snooze fires, then confirm its remaining alerts are canceled after sync.
+3. Schedule two chores for the same minute and confirm one grouped alert opens the matching chores.
+4. Save home while there, leave the region, defer an alert with **When I get home**, and return. Confirm the arrival alert opens the chore list and does not reappear after dismissal and refresh.
+5. Verify light/dark appearance, notification permissions, and Focus settings on the actual phone. Simulator and planner tests do not prove real-world geofence delivery.
 
 The allowance graph starts with the period's base ledger amount and applies active bonuses, deductions, and adjustments in timestamp order. Voided entries are excluded, so it represents the currently effective ledger rather than a historical audit of subsequently reversed decisions. The line ends at the latest refresh within the period; future days are left blank. Negative balances show rollover debt, while the payable balance remains floored at zero. Older widget snapshots without graph points continue to use the progress bar until the app refreshes them.
 

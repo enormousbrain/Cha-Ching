@@ -30,6 +30,7 @@ final class AppStore: ObservableObject {
     @Published var allowanceSettings: AllowanceSettings
     @Published var evidencePolicy: FamilyEvidencePolicy
     @Published var notificationState: NotificationState
+    @Published var reminderChoreIds: [UUID]?
     @Published var familySyncState: FamilySyncState
     @Published var mutationFailure: MutationFailure?
     @Published private(set) var activeMutationTitle: String?
@@ -40,6 +41,7 @@ final class AppStore: ObservableObject {
     private let allowanceSettingsKey = "chaching.allowanceSettings"
     private let deliveredNudgeIdsKey = "chaching.deliveredNudgeIds"
     private var lastAutomaticRemoteRefreshAt: Date?
+    private var reminderStateReady = false
 
     @Published private(set) var familyId: UUID
     @Published private(set) var parentId: UUID
@@ -89,6 +91,9 @@ final class AppStore: ObservableObject {
         self.familySyncState = .localPreview
         self.mutationFailure = nil
         self.activeMutationTitle = nil
+        #if DEBUG
+        reminderStateReady = SupabaseClientProvider.shared.auth.currentSession == nil
+        #endif
         publishWidgetSnapshot()
     }
 
@@ -378,6 +383,8 @@ final class AppStore: ObservableObject {
 
         do {
             try await remoteStore.signOut()
+            reminderStateReady = false
+            await ChoreReminderCenter.shared.clear()
             applyLocalPreviewState()
             familySyncState = .localPreview
         } catch {
@@ -1098,88 +1105,16 @@ final class AppStore: ObservableObject {
 
     private func scheduleLocalNotifications() async throws {
         let center = UNUserNotificationCenter.current()
-        center.removePendingNotificationRequests(withIdentifiers: localNotificationIdentifiers())
-
-        for chore in chores where !chore.isPaused && chore.archivedAt == nil {
-            guard let dueDate = Self.dateToday(for: chore.dueTime) else {
-                continue
-            }
-
-            for offset in chore.reminderOffsetsMinutes {
-                let content = UNMutableNotificationContent()
-                content.title = offset > 0 ? "Chore due soon" : "Chore due now"
-                content.body = offset > 0
-                    ? "\(chore.title) is due in \(offset) minutes."
-                    : "\(chore.title) is due now."
-                content.sound = .default
-
-                switch chore.recurrence.frequency {
-                case .once:
-                    guard let scheduledDate = chore.recurrence.oneTimeDate,
-                          let dueAt = Self.date(onSameDayAs: scheduledDate, time: chore.dueTime),
-                          let fireDate = Calendar.current.date(byAdding: .minute, value: -offset, to: dueAt),
-                          fireDate > Date() else {
-                        continue
-                    }
-                    var components = Calendar.current.dateComponents(
-                        [.year, .month, .day, .hour, .minute],
-                        from: fireDate
-                    )
-                    components.second = 0
-                    let request = UNNotificationRequest(
-                        identifier: choreNotificationIdentifier(choreId: chore.id, offsetMinutes: offset),
-                        content: content,
-                        trigger: UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
-                    )
-                    try await center.add(request)
-                case .daily:
-                    guard let fireDate = Calendar.current.date(byAdding: .minute, value: -offset, to: dueDate) else {
-                        continue
-                    }
-                    var components = Calendar.current.dateComponents([.hour, .minute], from: fireDate)
-                    components.second = 0
-                    let request = UNNotificationRequest(
-                        identifier: choreNotificationIdentifier(choreId: chore.id, offsetMinutes: offset),
-                        content: content,
-                        trigger: UNCalendarNotificationTrigger(dateMatching: components, repeats: true)
-                    )
-                    try await center.add(request)
-                case .weekly:
-                    let timeComponents = Calendar.current.dateComponents([.hour, .minute], from: dueDate)
-                    for weekday in chore.recurrence.weekdays {
-                        var dueComponents = DateComponents()
-                        dueComponents.weekday = weekday.rawValue
-                        dueComponents.hour = timeComponents.hour
-                        dueComponents.minute = timeComponents.minute
-                        guard let referenceDate = Calendar.current.date(byAdding: .day, value: -7, to: Date()),
-                              let matchingDueDate = Calendar.current.nextDate(
-                                after: referenceDate,
-                                matching: dueComponents,
-                                matchingPolicy: .nextTime
-                              ),
-                              let fireDate = Calendar.current.date(
-                                byAdding: .minute,
-                                value: -offset,
-                                to: matchingDueDate
-                              ) else {
-                            continue
-                        }
-                        var components = Calendar.current.dateComponents([.weekday, .hour, .minute], from: fireDate)
-                        components.second = 0
-                        let request = UNNotificationRequest(
-                            identifier: choreNotificationIdentifier(
-                                choreId: chore.id,
-                                offsetMinutes: offset,
-                                weekday: weekday
-                            ),
-                            content: content,
-                            trigger: UNCalendarNotificationTrigger(dateMatching: components, repeats: true)
-                        )
-                        try await center.add(request)
-                    }
-                }
-            }
+        guard reminderStateReady else {
+            throw FamilySyncError.missingChildProfile
         }
+        updateChoreReminders()
+        let owner = session.userId
+        let pending = await center.pendingNotificationRequests()
+        guard reminderStateReady, session.userId == owner else { return }
+        center.removePendingNotificationRequests(withIdentifiers: pending.filter {
+            $0.identifier.hasPrefix("chaching.allowance.")
+        }.map(\.identifier))
 
         let allowanceDate = nextAllowanceDate
         var allowanceComponents: DateComponents
@@ -1207,6 +1142,12 @@ final class AppStore: ObservableObject {
             trigger: allowanceTrigger
         )
         try await center.add(allowanceRequest)
+        try await ChoreReminderCenter.shared.schedule()
+    }
+
+    private func updateChoreReminders() {
+        let items = ChoreReminderPlanner.items(chores: chores, occurrences: occurrences, childId: childId, now: Date())
+        ChoreReminderCenter.shared.update(owner: "\(session.userId).\(familyId).\(childId)", items: items)
     }
 
     private func processPendingTaskNudges(familyId: UUID, childId: UUID) async {
@@ -1259,34 +1200,8 @@ final class AppStore: ObservableObject {
         try await UNUserNotificationCenter.current().add(request)
     }
 
-    private func localNotificationIdentifiers() -> [String] {
-        var identifiers = chores.flatMap { chore in
-            chore.reminderOffsetsMinutes.flatMap { offset in
-                [choreNotificationIdentifier(choreId: chore.id, offsetMinutes: offset)]
-                    + ChoreWeekday.allCases.map {
-                        choreNotificationIdentifier(
-                            choreId: chore.id,
-                            offsetMinutes: offset,
-                            weekday: $0
-                        )
-                    }
-            }
-        }
-        identifiers.append(allowanceNotificationIdentifier)
-        return identifiers
-    }
-
     private var allowanceNotificationIdentifier: String {
         "chaching.allowance.\(familyId.uuidString)"
-    }
-
-    private func choreNotificationIdentifier(
-        choreId: UUID,
-        offsetMinutes: Int,
-        weekday: ChoreWeekday? = nil
-    ) -> String {
-        let weekdaySuffix = weekday.map { ".weekday.\($0.rawValue)" } ?? ""
-        return "chaching.chore.\(choreId.uuidString).offset.\(offsetMinutes)\(weekdaySuffix)"
     }
 
     private func nudgeNotificationIdentifier(nudgeId: UUID) -> String {
@@ -1635,6 +1550,7 @@ final class AppStore: ObservableObject {
             .filter { $0.childId == selectedChildProfile.id }
             .map { localChoreDefinition(from: $0) }
         occurrences = remoteOccurrences
+        reminderStateReady = true
         submissions = remoteSubmissions
         ledger = entriesByWeek[weekRecord.id] ?? []
         allowancePeriods = weekRecords.map {
@@ -2214,6 +2130,10 @@ final class AppStore: ObservableObject {
     }
 
     private func publishWidgetSnapshot() {
+        if reminderStateReady {
+            updateChoreReminders()
+            Task { await refreshNotificationScheduleIfAuthorized() }
+        }
         let summary = allowanceSummary
         let nextOccurrence = nextDueOccurrence
         let nextChore = nextOccurrence.map { chore(for: $0) }

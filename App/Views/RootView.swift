@@ -2,6 +2,9 @@ import SwiftUI
 
 struct RootView: View {
     @EnvironmentObject private var store: AppStore
+#if DEBUG
+    @State private var previewReminders = ProcessInfo.processInfo.environment["CHACHING_REMINDER_SETTINGS"] == "1"
+#endif
 
     var body: some View {
         Group {
@@ -12,11 +15,22 @@ struct RootView: View {
             }
         }
         .tint(.inkBlack)
+#if DEBUG
+        .sheet(isPresented: $previewReminders) {
+            ReminderSettingsView().environmentObject(store)
+        }
+#endif
         .onOpenURL { url in
             store.handleIncomingURL(url)
         }
         .sheet(item: $store.pendingInvite) { invite in
             InviteLandingSheet(invite: invite)
+                .environmentObject(store)
+        }
+        .sheet(isPresented: Binding(get: { store.reminderChoreIds != nil }, set: {
+            if !$0 { store.reminderChoreIds = nil }
+        })) {
+            ReminderChoreListView()
                 .environmentObject(store)
         }
         .alert(item: $store.mutationFailure) { failure in
