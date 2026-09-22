@@ -58,7 +58,7 @@ final class AppStore: ObservableObject {
     @Published private(set) var parentName: String
 
     init(
-        snapshot: SeedSnapshot = SeedData.snapshot(),
+        snapshot: SeedSnapshot = SeedData.emptySnapshot(),
         inviteAcceptanceService: InviteAcceptanceServicing = SupabaseInviteAcceptanceService(),
         remoteStore: SupabaseRemoteStore = SupabaseRemoteStore(),
         settingsStore: UserDefaults = .standard
@@ -189,6 +189,12 @@ final class AppStore: ObservableObject {
 
     var remainingCount: Int {
         todayOccurrences.filter { $0.status == .upcoming || $0.status == .due }.count
+    }
+
+    var catchUpOccurrences: [TaskOccurrence] {
+        occurrences
+            .filter { $0.childId == childId && $0.status == .missed && allowanceSettlements[$0.weekId] == nil }
+            .sorted { ($0.dueAt, $0.id.uuidString) < ($1.dueAt, $1.id.uuidString) }
     }
 
     var pendingReviewOccurrences: [TaskOccurrence] {
@@ -1584,7 +1590,7 @@ final class AppStore: ObservableObject {
 
     private func applyLocalPreviewState() {
         savingsGoals = []
-        let snapshot = SeedData.snapshot()
+        let snapshot = SeedData.emptySnapshot()
         familyId = snapshot.familyId
         parentId = snapshot.parentId
         childId = snapshot.childId

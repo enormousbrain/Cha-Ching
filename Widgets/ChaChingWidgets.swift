@@ -51,7 +51,7 @@ struct ChaChingAllowanceProvider: TimelineProvider {
 
     private var currentEntry: ChaChingAllowanceEntry {
         guard let snapshot = ChaChingWidgetSharedState.loadSnapshot() else {
-            return sampleEntry
+            return emptyEntry
         }
 
         return ChaChingAllowanceEntry(
@@ -66,6 +66,15 @@ struct ChaChingAllowanceProvider: TimelineProvider {
             nextChoreTime: snapshot.nextChoreTime,
             trend: snapshot.trend ?? [],
             periodEndsAt: snapshot.periodEndsAt
+        )
+    }
+
+    private var emptyEntry: ChaChingAllowanceEntry {
+        ChaChingAllowanceEntry(
+            date: Date(), periodTitle: "No allowance yet", childName: "",
+            currentCents: 0, baseCents: 0, rolloverDebtCents: 0, choresLeft: 0,
+            nextChoreTitle: "Sign in to sync", nextChoreTime: "",
+            trend: [], periodEndsAt: nil
         )
     }
 
@@ -97,6 +106,9 @@ struct ChaChingAllowanceWidgetView: View {
     var entry: ChaChingAllowanceEntry
 
     var body: some View {
+        if entry.baseCents == 0 {
+            emptyWidget
+        } else {
         switch family {
         case .systemSmall:
             smallWidget
@@ -107,6 +119,19 @@ struct ChaChingAllowanceWidgetView: View {
         default:
             mediumWidget
         }
+        }
+    }
+
+    private var emptyWidget: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("ChaChing")
+                .font(.headline.weight(.heavy))
+            Text("Sign in to see allowance progress.")
+                .font(.caption)
+                .foregroundStyle(Color.ccMuted)
+        }
+        .padding(14)
+        .containerBackground(Color.ccPaper, for: .widget)
     }
 
     private var smallWidget: some View {

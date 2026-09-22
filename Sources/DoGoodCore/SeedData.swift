@@ -1,6 +1,30 @@
 import Foundation
 
 public enum SeedData {
+    public static func emptySnapshot() -> SeedSnapshot {
+        let familyId = UUID()
+        return SeedSnapshot(
+            familyId: familyId,
+            parentId: UUID(),
+            childId: UUID(),
+            weekId: UUID(),
+            familyName: "Your Family",
+            childName: "",
+            parentName: "",
+            weeklyAllowanceCents: 0,
+            allowanceSettings: AllowanceSettings(
+                familyId: familyId,
+                baseAllowanceCents: 0,
+                cadence: .weekly,
+                allowanceWeekday: .friday,
+                nextAllowanceDate: Date()
+            ),
+            members: [], childProfiles: [], childInvites: [], parentInvites: [],
+            evidencePolicy: FamilyEvidencePolicy(familyId: familyId),
+            chores: [], occurrences: [], submissions: [], ledger: [], allowancePeriods: []
+        )
+    }
+
     public static let familyId = UUID(uuidString: "87D72069-308B-44CB-BBBE-0C27F5665B5B")!
     public static let parentId = UUID(uuidString: "E3C87538-7C70-4D20-86F3-F0E01E8AEE43")!
     public static let childId = UUID(uuidString: "A14615DD-424E-44FB-B2E6-C61DA3CE680C")!

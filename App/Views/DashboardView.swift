@@ -19,6 +19,18 @@ struct DashboardView: View {
 
                 quickStats
 
+                if !store.catchUpOccurrences.isEmpty {
+                    Button {
+                        store.reminderOccurrenceId = nil
+                        store.reminderChoreIds = Array(Set(store.catchUpOccurrences.map(\.choreDefinitionId)))
+                    } label: {
+                        Label("Catch up on \(store.catchUpOccurrences.count) missed \(store.catchUpOccurrences.count == 1 ? "chore" : "chores")", systemImage: "arrow.uturn.forward.circle.fill")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.warmOrange)
+                }
+
                 VStack(alignment: .leading, spacing: 14) {
                     HStack {
                         Text("Today's Chores")

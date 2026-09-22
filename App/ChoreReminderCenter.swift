@@ -333,10 +333,10 @@ struct ReminderChoreListView: View {
         if let id = store.reminderOccurrenceId {
             return store.occurrences.filter { $0.id == id }
         }
-        return store.todayOccurrences.filter { occurrence in
+        return store.occurrences.filter { occurrence in
             (occurrence.status.isOpen || occurrence.status == .missed)
                 && (store.reminderChoreIds?.contains(occurrence.choreDefinitionId) == true)
-        }
+        }.sorted { ($0.dueAt, $0.id.uuidString) < ($1.dueAt, $1.id.uuidString) }
     }
 
     var body: some View {

@@ -112,6 +112,10 @@ enum ChaChingWidgetSharedState {
         return try? JSONDecoder().decode(ChaChingWidgetSnapshot.self, from: data)
     }
 
+    static func clearSnapshot() {
+        sharedDefaults?.removeObject(forKey: snapshotKey)
+    }
+
     @discardableResult
     static func saveSnapshot(_ snapshot: ChaChingWidgetSnapshot) -> Bool {
         guard let data = try? JSONEncoder().encode(snapshot),
