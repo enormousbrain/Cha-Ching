@@ -43,6 +43,8 @@ final class AppStore: ObservableObject {
     private let allowanceSettingsKey = "chaching.allowanceSettings"
     private let deliveredNudgeIdsKey = "chaching.deliveredNudgeIds"
     private var lastAutomaticRemoteRefreshAt: Date?
+    private var remoteRefreshTask: Task<Void, Never>?
+    private var remoteRefreshGeneration = UUID()
     private var reminderStateReady = false
     private var pushObserver: NSObjectProtocol?
 
@@ -174,10 +176,10 @@ final class AppStore: ObservableObject {
     var allowanceRequestMessage: String {
         let amount = Money.dollars(allowanceSummary.currentTotalCents)
         if allowanceSummary.hasRolloverDebt {
-            return "Hi \(parentName), my \(AppBrand.displayName) allowance closed at $0.00 this period. I will start next period reduced by \(Money.dollars(allowanceSummary.rolloverDebtCents))."
+            return "Hi \(parentName), my \(AppBrand.displayName) allowance closed at $0.00 this period, so there is no Apple Cash due. I will start next period reduced by \(Money.dollars(allowanceSummary.rolloverDebtCents))."
         }
 
-        return "Hi \(parentName), I finished my \(AppBrand.displayName) chores and earned \(amount). Can you send my allowance when you have a chance?"
+        return "Hi \(parentName), I finished my \(AppBrand.displayName) chores and earned \(amount). Can you send my allowance via Apple Cash when you have a chance?"
     }
 
     var todayOccurrences: [TaskOccurrence] {
@@ -249,7 +251,8 @@ final class AppStore: ObservableObject {
     }
 
     func switchParentChild(to id: UUID) async {
-        guard isParentSession, childProfiles.contains(where: { $0.id == id }) else { return }
+        guard isParentSession, !isMutationInFlight,
+              childProfiles.contains(where: { $0.id == id && $0.familyId == familyId }) else { return }
         guard SupabaseClientProvider.shared.auth.currentSession != nil else {
             if let profile = childProfiles.first(where: { $0.id == id }) {
                 childId = profile.id
@@ -264,20 +267,37 @@ final class AppStore: ObservableObject {
     }
 
     func loadRemoteFamilyState(selectingChildId: UUID? = nil) async {
+        // Keep foreground, background, and child-switch refreshes in request order.
+        let previous = remoteRefreshTask
+        let generation = remoteRefreshGeneration
+        let task = Task { @MainActor [weak self] in
+            await previous?.value
+            guard let self, self.remoteRefreshGeneration == generation else { return }
+            await self.performRemoteFamilyRefresh(selectingChildId: selectingChildId, generation: generation)
+        }
+        remoteRefreshTask = task
+        await task.value
+    }
+
+    private func performRemoteFamilyRefresh(selectingChildId: UUID?, generation: UUID) async {
         familySyncState = .loading
 
         do {
             let authSession = try await remoteStore.currentSession()
             let memberships = try await remoteStore.fetchMembershipsForCurrentUser(userId: authSession.user.id)
 
+            guard remoteRefreshGeneration == generation else { return }
             guard let membership = memberships.first else {
                 familySyncState = .needsBootstrap("Signed in. Create your remote family to sync across devices.")
                 return
             }
 
-            try await applyRemoteFamilyState(for: membership, authUserId: authSession.user.id, selectingChildId: selectingChildId)
+            guard remoteRefreshGeneration == generation else { return }
+            try await applyRemoteFamilyState(for: membership, authUserId: authSession.user.id, selectingChildId: selectingChildId, generation: generation)
+            guard remoteRefreshGeneration == generation else { return }
             familySyncState = .synced("Synced \(familyName) across devices.")
         } catch {
+            guard remoteRefreshGeneration == generation else { return }
             familySyncState = .failed(error.localizedDescription)
         }
     }
@@ -400,6 +420,7 @@ final class AppStore: ObservableObject {
     }
 
     func signOutRemoteFamily() async {
+        remoteRefreshGeneration = UUID()
         familySyncState = .loading
 
         do {
@@ -1342,9 +1363,11 @@ final class AppStore: ObservableObject {
                 }
             },
             localCommit: {
+                chores.removeAll { $0.id == chore.id }
                 chores.append(chore)
                 chores.sort { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
                 if let occurrence {
+                    occurrences.removeAll { $0.id == occurrence.id }
                     occurrences.append(occurrence)
                 }
                 publishWidgetSnapshot()
@@ -1559,18 +1582,21 @@ final class AppStore: ObservableObject {
         publishWidgetSnapshot()
     }
 
-    private func applyRemoteFamilyState(for membership: FamilyMemberRecord, authUserId: UUID, selectingChildId: UUID? = nil) async throws {
+    private func applyRemoteFamilyState(for membership: FamilyMemberRecord, authUserId: UUID, selectingChildId: UUID? = nil, generation: UUID) async throws {
         let role = FamilyMemberRole(rawValue: membership.role) ?? .parent
         let familyRecord = try await remoteStore.fetchFamily(id: membership.familyId)
         let memberRecords = try await remoteStore.fetchFamilyMembers(familyId: membership.familyId)
         let profileRecords = try await remoteStore.fetchChildProfiles(familyId: membership.familyId)
         let evidencePolicyRecord = try await remoteStore.fetchFamilyEvidencePolicy(familyId: membership.familyId)
 
-        guard let selectedChildProfile = selectedRemoteChildProfile(
-            from: profileRecords,
+        let selectionKey = "chaching.selectedChild.\(authUserId).\(membership.familyId)"
+        let savedChildId = settingsStore.string(forKey: selectionKey).flatMap(UUID.init(uuidString:))
+        guard let selectedChildProfile = ChildProfile.selected(
+            from: profileRecords.map { localChildProfile(from: $0) },
+            familyId: membership.familyId,
             role: role,
-            authUserId: authUserId,
-            preferredChildId: selectingChildId
+            userId: authUserId,
+            preferredId: selectingChildId ?? savedChildId
         ) else {
             throw FamilySyncError.missingChildProfile
         }
@@ -1606,12 +1632,19 @@ final class AppStore: ObservableObject {
             .filter { occurrenceIds.contains($0.taskOccurrenceId) }
             .map { localSubmission(from: $0) }
 
+        guard remoteRefreshGeneration == generation,
+              SupabaseClientProvider.shared.auth.currentSession?.user.id == authUserId else {
+            throw CancellationError()
+        }
+        if role == .parent {
+            settingsStore.set(selectedChildProfile.id.uuidString, forKey: selectionKey)
+        }
         familyId = familyRecord.id
         childId = selectedChildProfile.id
         weekId = weekRecord.id
         familyName = familyRecord.name
         childName = selectedChildProfile.displayName
-        savingsGoals = selectedChildProfile.savingsGoals ?? []
+        savingsGoals = profileRecords.first { $0.id == selectedChildProfile.id }?.savingsGoals ?? []
 
         let parentMember = memberRecords.first { $0.role == FamilyMemberRole.parent.rawValue }
         parentId = parentMember?.userId ?? (role == .parent ? authUserId : parentId)
@@ -1627,7 +1660,6 @@ final class AppStore: ObservableObject {
             .map { localChoreDefinition(from: $0) }
         occurrences = remoteOccurrences
         reminderStateReady = true
-        await syncAPNsDeviceToken()
         submissions = remoteSubmissions
         ledger = entriesByWeek[weekRecord.id] ?? []
         allowancePeriods = weekRecords.map {
@@ -1654,24 +1686,10 @@ final class AppStore: ObservableObject {
         }
 
         publishWidgetSnapshot()
+        await syncAPNsDeviceToken()
+        guard remoteRefreshGeneration == generation else { return }
         await processPendingTaskNudges(familyId: familyRecord.id, childId: selectedChildProfile.id)
         await refreshNotificationScheduleIfAuthorized()
-    }
-
-    private func selectedRemoteChildProfile(
-        from profiles: [ChildProfileRecord],
-        role: FamilyMemberRole,
-        authUserId: UUID,
-        preferredChildId: UUID? = nil
-    ) -> ChildProfileRecord? {
-        switch role {
-        case .parent:
-            return profiles.first { $0.id == preferredChildId }
-                ?? profiles.sorted { $0.createdAt < $1.createdAt }.first
-        case .child:
-            return profiles.first { $0.linkedUserId == authUserId }
-                ?? profiles.sorted { $0.createdAt < $1.createdAt }.first
-        }
     }
 
     private func localFamilyMember(from record: FamilyMemberRecord) -> FamilyMember {

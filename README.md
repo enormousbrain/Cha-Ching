@@ -355,7 +355,11 @@ psql "postgresql://postgres:${SUPABASE_DB_PASSWORD}@db.pjvgtmxyxrfhabyuefne.supa
 
 ## Next Slices
 
-1. Smoke-test a location-aware chore on Zoe's physical device, including permission denial and arrival-radius behavior.
-2. Add a privacy-reviewed departure-risk alert for parents, only if the family enables it.
-3. Add a dedicated child allowance-day celebration and parent closeout review before the payment request handoff.
-4. Add orphaned-upload cleanup as a backstop for uploads interrupted before submission registration.
+Release blockers and verification are tracked in [the release-readiness checklist](docs/release-readiness.md).
+
+1. Verify the background-refresh crash fix on physical devices through TestFlight.
+2. Add server-backed parent period closeout, unresolved-review handling, and paid-state tracking before enabling a finalized payment request.
+3. Add account deletion, accessible privacy/support links, and explicit consent before sharing photos with cloud AI.
+4. Harden notification budgets and location-trigger timing, then smoke-test permissions and arrival behavior on a physical device.
+5. Add orphaned-upload cleanup and cross-family/multi-child integration coverage.
+6. Consider a privacy-reviewed departure-risk alert only after the existing location reminders are reliable.

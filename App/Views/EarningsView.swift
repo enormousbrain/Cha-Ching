@@ -548,7 +548,7 @@ struct AllowanceRequestCard: View {
 
             if MFMessageComposeViewController.canSendText() {
                 Button(action: onRequest) {
-                    Label("Message Parent", systemImage: "message.fill")
+                    Label("Request Apple Cash", systemImage: "dollarsign.circle.fill")
                         .font(.headline)
                         .frame(maxWidth: .infinity)
                         .frame(height: 52)

@@ -89,6 +89,20 @@ public struct ChildProfile: Identifiable, Codable, Equatable, Sendable {
     public var createdAt: Date
     public var updatedAt: Date
 
+    public static func selected(
+        from profiles: [ChildProfile], familyId: UUID, role: FamilyMemberRole,
+        userId: UUID, preferredId: UUID?
+    ) -> ChildProfile? {
+        let familyProfiles = profiles.filter { $0.familyId == familyId }
+        if role == .child {
+            return familyProfiles.first { $0.linkedUserId == userId }
+        }
+        return familyProfiles.first { $0.id == preferredId }
+            ?? familyProfiles.sorted {
+                ($0.createdAt, $0.id.uuidString) < ($1.createdAt, $1.id.uuidString)
+            }.first
+    }
+
     public init(
         id: UUID = UUID(),
         familyId: UUID,

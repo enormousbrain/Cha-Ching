@@ -894,6 +894,8 @@ struct ChoreTemplatePickerView: View {
     @State private var ageGroup: ChoreTemplateAgeGroup = .ages8To10
     @State private var selectedTemplateIDs: Set<String> = []
     @State private var isAdding = false
+    @State private var importIDs: [String: UUID] = [:]
+    @State private var importError: String?
 
     private var templates: [ChoreTemplate] {
         ChoreTemplate.forAgeGroup(ageGroup)
@@ -902,6 +904,11 @@ struct ChoreTemplatePickerView: View {
     var body: some View {
         NavigationStack {
             Form {
+                if let importError {
+                    Section {
+                        Text(importError).foregroundStyle(.red)
+                    }
+                }
                 Section {
                     Picker("Age group", selection: $ageGroup) {
                         ForEach(ChoreTemplateAgeGroup.allCases) { group in
@@ -939,14 +946,17 @@ struct ChoreTemplatePickerView: View {
                     }
                 }
             }
+            .disabled(isAdding)
+            .interactiveDismissDisabled(isAdding)
             .navigationTitle("Chore Templates")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                        .disabled(isAdding)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(isAdding ? "Adding..." : "Add (selectedTemplateIDs.count)") {
+                    Button(isAdding ? "Adding..." : "Add (\(selectedTemplateIDs.count))") {
                         addSelectedTemplates()
                     }
                     .disabled(selectedTemplateIDs.isEmpty || isAdding)
@@ -965,10 +975,23 @@ struct ChoreTemplatePickerView: View {
 
     private func addSelectedTemplates() {
         let selected = ChoreTemplate.all.filter { selectedTemplateIDs.contains($0.id) }
+        let familyId = store.familyId
+        let childId = store.childId
+        for template in selected where importIDs[template.id] == nil {
+            importIDs[template.id] = UUID()
+        }
+        importError = nil
         isAdding = true
         Task {
+            defer { isAdding = false }
             for template in selected {
-                _ = await store.addChore(
+                guard store.familyId == familyId, store.childId == childId else {
+                    importError = "The selected child changed. Close this sheet and try again."
+                    return
+                }
+                guard let importID = importIDs[template.id] else { return }
+                let saved = await store.addChore(
+                    id: importID,
                     title: template.title,
                     description: template.description,
                     instructions: template.instructions,
@@ -979,8 +1002,12 @@ struct ChoreTemplatePickerView: View {
                     verificationMode: .photoOptional,
                     blockPeopleInPhotos: true
                 )
+                guard saved else {
+                    importError = "Couldn't add \(template.title). Chores already added are saved. Try again to add the remaining selections."
+                    return
+                }
+                selectedTemplateIDs.remove(template.id)
             }
-            isAdding = false
             dismiss()
         }
     }

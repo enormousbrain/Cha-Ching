@@ -76,7 +76,8 @@ private final class ChaChingBackgroundRefresh {
             return
         }
 
-        didRegister = BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.identifier, using: nil) { task in
+        // This callback inherits MainActor isolation; nil delivers it on a background queue.
+        didRegister = BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.identifier, using: .main) { task in
             guard let refreshTask = task as? BGAppRefreshTask else {
                 task.setTaskCompleted(success: false)
                 return
@@ -106,7 +107,7 @@ private final class ChaChingBackgroundRefresh {
             task.setTaskCompleted(success: true)
         }
 
-        task.expirationHandler = {
+        task.expirationHandler = { @Sendable in
             refreshTask.cancel()
         }
     }
