@@ -14,7 +14,8 @@ Updated September 21, 2026. This is a release gate, not a list of completed feat
 - [ ] Publish a new build with the crash fix and verify background execution on physical devices; monitor new crash reports.
 - [ ] Verify two-child switching during polling, relaunch, failed requests, and sign-out. Add AppStore integration tests for refresh ordering and mutation/refresh overlap; current selection tests cover only the core selection policy.
 - [ ] Fix local-preview child switching, which currently filters arrays destructively and does not restore a complete per-child context.
-- [ ] Replace the current-balance allowance request with a server-finalized period closeout. Resolve pending reviews/disputes, let a parent confirm the amount, record paid status, and guard duplicate settlement. Sending a message must never mark an allowance paid automatically.
+- [x] Replace the current-balance request with server-confirmed closeout, historical reviews, explicit paid status, and idempotent settlement. See [allowance closeout](allowance-closeout.md).
+- [ ] Verify the complete closeout and request flow on parent and child devices. Sending a message must never mark an allowance paid automatically.
 - [ ] Add account deletion with an explicit family-owner/child-data retention policy and authenticated backend enforcement.
 - [ ] Add privacy/support links and explicit cloud-photo-sharing consent before upload. Check retention, deletion, and disclosure behavior end to end.
 - [ ] Bound all reminder categories together, deduplicate location regions, reserve capacity for home reminders, and prevent stale/future chore arrival alerts.

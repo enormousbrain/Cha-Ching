@@ -113,6 +113,29 @@ struct SupabaseRemoteStore: Sendable {
             .value
     }
 
+    func fetchAllowanceSettlements(weekIds: [UUID]) async throws -> [AllowanceSettlementRecord] {
+        guard !weekIds.isEmpty else { return [] }
+        return try await client.from("allowance_settlements").select()
+            .in("week_id", values: weekIds.map(\.uuidString)).execute().value
+    }
+
+    func confirmAllowancePeriod(weekId: UUID, amountCents: Int) async throws -> AllowanceSettlementRecord {
+        let rows: [AllowanceSettlementRecord] = try await client.rpc(
+            "confirm_allowance_period",
+            params: ConfirmAllowanceParams(targetWeekId: weekId, expectedAmountCents: amountCents)
+        ).execute().value
+        guard let row = rows.first else { throw SupabaseRemoteStoreError.emptySettlementResponse }
+        return row
+    }
+
+    func markAllowancePaid(weekId: UUID) async throws -> AllowanceSettlementRecord {
+        let rows: [AllowanceSettlementRecord] = try await client.rpc(
+            "mark_allowance_paid", params: MarkAllowancePaidParams(targetWeekId: weekId)
+        ).execute().value
+        guard let row = rows.first else { throw SupabaseRemoteStoreError.emptySettlementResponse }
+        return row
+    }
+
     func fetchChores(familyId: UUID) async throws -> [ChoreDefinitionRecord] {
         try await client
             .from("chore_definitions")
@@ -131,6 +154,12 @@ struct SupabaseRemoteStore: Sendable {
             .order("due_at")
             .execute()
             .value
+    }
+
+    func fetchOccurrences(weekIds: [UUID]) async throws -> [TaskOccurrenceRecord] {
+        guard !weekIds.isEmpty else { return [] }
+        return try await client.from("task_occurrences").select()
+            .in("week_id", values: weekIds.map(\.uuidString)).order("due_at").execute().value
     }
 
     func fetchChoreSubmissions(childId: UUID) async throws -> [ChoreSubmissionRecord] {
@@ -812,6 +841,7 @@ enum SupabaseRemoteStoreError: LocalizedError {
     case emptyChoreExcuseRequestResponse
     case emptyNoPhotoSubmissionResponse
     case emptyPhotoSubmissionResponse
+    case emptySettlementResponse
 
     var errorDescription: String? {
         switch self {
@@ -831,6 +861,8 @@ enum SupabaseRemoteStoreError: LocalizedError {
             return "Supabase did not return the submitted task."
         case .emptyPhotoSubmissionResponse:
             return "Supabase did not register the photo submission."
+        case .emptySettlementResponse:
+            return "Supabase did not return the allowance settlement."
         }
     }
 }

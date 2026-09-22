@@ -310,16 +310,20 @@ struct ParentTaskReviewView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
         .safeAreaInset(edge: .bottom) {
-            if let occurrence = store.occurrences.first(where: { $0.id == occurrenceId }), occurrence.status.needsParentReview && occurrence.status != .rejected {
+            if let occurrence = store.occurrences.first(where: { $0.id == occurrenceId }),
+               store.allowanceSettlements[occurrence.weekId] == nil,
+               (occurrence.status.needsParentReview || occurrence.status.isOpen) && occurrence.status != .rejected {
                 VStack(spacing: 10) {
                     if store.isMutationInFlight { ProgressView("Saving decision...").font(.caption) }
                     HStack(spacing: 0) {
                         decisionButton("Approve", icon: "checkmark", color: .green) {
                             Task { if await store.approve(occurrence) { dismiss() } }
                         }
-                        Divider().frame(height: 32)
-                        decisionButton("Retake", icon: "arrow.clockwise", color: .inkBlack) {
-                            Task { if await store.requestRetake(occurrence) { dismiss() } }
+                        if occurrence.weekId == store.weekId {
+                            Divider().frame(height: 32)
+                            decisionButton("Retake", icon: "arrow.clockwise", color: .inkBlack) {
+                                Task { if await store.requestRetake(occurrence) { dismiss() } }
+                            }
                         }
                         Divider().frame(height: 32)
                         decisionButton("Reject", icon: "xmark", color: .warmOrange) {
@@ -336,7 +340,9 @@ struct ParentTaskReviewView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
-                    if let occurrence = store.occurrences.first(where: { $0.id == occurrenceId }), occurrence.status.needsParentReview {
+                    if let occurrence = store.occurrences.first(where: { $0.id == occurrenceId }),
+                       store.allowanceSettlements[occurrence.weekId] == nil,
+                       occurrence.status.needsParentReview || occurrence.status.isOpen {
                         Button {
                             Task { if await store.excuse(occurrence, reason: "Parent excused") { dismiss() } }
                         } label: { Label("Excuse without deduction", systemImage: "hand.raised") }

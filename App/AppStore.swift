@@ -27,6 +27,7 @@ final class AppStore: ObservableObject {
     @Published var submissions: [ChoreSubmission]
     @Published var ledger: [LedgerEntry]
     @Published var allowancePeriods: [AllowancePeriod]
+    @Published private(set) var allowanceSettlements: [UUID: AllowanceSettlement] = [:]
     @Published var allowanceSettings: AllowanceSettings
     @Published var evidencePolicy: FamilyEvidencePolicy
     @Published var notificationState: NotificationState
@@ -94,6 +95,7 @@ final class AppStore: ObservableObject {
         }
         self.notificationState = .idle
         self.familySyncState = .localPreview
+        self.allowanceSettlements = [:]
         self.mutationFailure = nil
         self.activeMutationTitle = nil
         #if DEBUG
@@ -173,13 +175,8 @@ final class AppStore: ObservableObject {
         allowanceSettings.nextScheduledAllowanceDate()
     }
 
-    var allowanceRequestMessage: String {
-        let amount = Money.dollars(allowanceSummary.currentTotalCents)
-        if allowanceSummary.hasRolloverDebt {
-            return "Hi \(parentName), my \(AppBrand.displayName) allowance closed at $0.00 this period, so there is no Apple Cash due. I will start next period reduced by \(Money.dollars(allowanceSummary.rolloverDebtCents))."
-        }
-
-        return "Hi \(parentName), I finished my \(AppBrand.displayName) chores and earned \(amount). Can you send my allowance via Apple Cash when you have a chance?"
+    var requestableAllowancePeriods: [AllowancePeriod] {
+        archivedAllowancePeriods.filter(\.canRequestPayment)
     }
 
     var todayOccurrences: [TaskOccurrence] {
@@ -195,7 +192,7 @@ final class AppStore: ObservableObject {
     }
 
     var pendingReviewOccurrences: [TaskOccurrence] {
-        occurrences.filter { $0.status.needsParentReview }
+        occurrences.filter { $0.status.needsParentReview && allowanceSettlements[$0.weekId] == nil }
     }
 
     var nextDueOccurrence: TaskOccurrence? {
@@ -248,6 +245,44 @@ final class AppStore: ObservableObject {
 
     func refreshRemoteFamilyState() async {
         await loadRemoteFamilyStateIfSignedIn(force: true)
+    }
+
+    func confirmAllowancePeriod(_ period: AllowancePeriod) async -> Bool {
+        guard isParentSession, period.familyId == familyId, period.childId == childId,
+              period.isArchived, canAttemptRemoteRefresh else { return false }
+        var response: AllowanceSettlementRecord?
+        let saved = await commitMutation(actionTitle: "Confirm allowance", successMessage: "Allowance amount locked across devices.", remoteSave: {
+            response = try await self.remoteStore.confirmAllowancePeriod(weekId: period.id, amountCents: period.summary.currentTotalCents)
+        }, localCommit: {
+            if let response { self.applySettlement(response) }
+        })
+        if saved { await refreshRemoteFamilyState() }
+        return saved
+    }
+
+    func markAllowancePaid(_ period: AllowancePeriod) async -> Bool {
+        guard isParentSession, period.familyId == familyId, period.childId == childId,
+              allowanceSettlements[period.id] != nil, canAttemptRemoteRefresh else { return false }
+        var response: AllowanceSettlementRecord?
+        return await commitMutation(actionTitle: "Record payment", successMessage: "Payment recorded across devices.", remoteSave: {
+            response = try await self.remoteStore.markAllowancePaid(weekId: period.id)
+        }, localCommit: {
+            if let response { self.applySettlement(response) }
+        })
+    }
+
+    func loadPeriodReviews(_ period: AllowancePeriod) async throws -> [TaskOccurrence] {
+        guard period.familyId == familyId, period.childId == childId else { throw CancellationError() }
+        let rows = try await remoteStore.fetchOccurrences(weekId: period.id)
+        let photos = try await remoteStore.fetchChoreSubmissions(childId: period.childId)
+        guard period.familyId == familyId, period.childId == childId else { throw CancellationError() }
+        let tasks = rows.map { localOccurrence(from: $0) }
+        let ids = Set(tasks.map(\.id))
+        occurrences.removeAll { $0.weekId == period.id }
+        occurrences.append(contentsOf: tasks)
+        submissions.removeAll { ids.contains($0.taskOccurrenceId) }
+        submissions.append(contentsOf: photos.filter { ids.contains($0.taskOccurrenceId) }.map { localSubmission(from: $0) })
+        return tasks
     }
 
     func switchParentChild(to id: UUID) async {
@@ -1570,6 +1605,7 @@ final class AppStore: ObservableObject {
         submissions = snapshot.submissions
         ledger = snapshot.ledger
         allowancePeriods = snapshot.allowancePeriods
+        allowanceSettlements = [:]
         evidencePolicy = snapshot.evidencePolicy
 
         if let savedSettings = Self.loadAllowanceSettings(from: settingsStore, key: allowanceSettingsKey),
@@ -1614,13 +1650,18 @@ final class AppStore: ObservableObject {
             familyId: membership.familyId,
             childId: selectedChildProfile.id
         )
+        let settlementRecords = try await remoteStore.fetchAllowanceSettlements(weekIds: weekRecords.map(\.id))
+        let settlements = Dictionary(uniqueKeysWithValues: settlementRecords.map {
+            ($0.weekId, AllowanceSettlement(amountCents: $0.amountCents, confirmedAt: $0.confirmedAt, paidAt: $0.paidAt))
+        })
 
         guard let weekRecord = weekRecords.first(where: { $0.archivedAt == nil }) ?? weekRecords.first else {
             throw FamilySyncError.missingCurrentWeek
         }
 
         let choreRecords = try await remoteStore.fetchChores(familyId: membership.familyId)
-        let occurrenceRecords = try await remoteStore.fetchOccurrences(weekId: weekRecord.id)
+        let reviewWeekIds = weekRecords.filter { $0.id == weekRecord.id || settlements[$0.id] == nil }.map(\.id)
+        let occurrenceRecords = try await remoteStore.fetchOccurrences(weekIds: reviewWeekIds)
         let submissionRecords = try await remoteStore.fetchChoreSubmissions(childId: selectedChildProfile.id)
         let ledgerRecords = try await remoteStore.fetchLedger(childId: selectedChildProfile.id)
         let localLedgerEntries = ledgerRecords.map { localLedgerEntry(from: $0) }
@@ -1663,8 +1704,9 @@ final class AppStore: ObservableObject {
         submissions = remoteSubmissions
         ledger = entriesByWeek[weekRecord.id] ?? []
         allowancePeriods = weekRecords.map {
-            localAllowancePeriod(from: $0, entries: entriesByWeek[$0.id] ?? [])
+            localAllowancePeriod(from: $0, entries: entriesByWeek[$0.id] ?? [], settlement: settlements[$0.id])
         }
+        allowanceSettlements = settlements
         evidencePolicy = evidencePolicyRecord.map { localEvidencePolicy(from: $0) }
             ?? FamilyEvidencePolicy(familyId: familyRecord.id)
 
@@ -1847,7 +1889,8 @@ final class AppStore: ObservableObject {
 
     private func localAllowancePeriod(
         from record: WeekRecord,
-        entries: [LedgerEntry]
+        entries: [LedgerEntry],
+        settlement: AllowanceSettlement? = nil
     ) -> AllowancePeriod {
         AllowancePeriod(
             id: record.id,
@@ -1858,8 +1901,22 @@ final class AppStore: ObservableObject {
             baseAllowanceCents: record.baseAllowanceCents,
             archivedAt: record.archivedAt,
             finalBalanceCents: record.finalBalanceCents,
-            entries: entries
+            entries: entries,
+            settlement: settlement
         )
+    }
+
+    private func updateSettlement(periodId: UUID, amountCents: Int, confirmedAt: Date, paidAt: Date?) {
+        allowanceSettlements[periodId] = AllowanceSettlement(amountCents: amountCents, confirmedAt: confirmedAt, paidAt: paidAt)
+        allowancePeriods = allowancePeriods.map { period in
+            var updated = period
+            if updated.id == periodId { updated.settlement = allowanceSettlements[periodId] }
+            return updated
+        }
+    }
+
+    private func applySettlement(_ record: AllowanceSettlementRecord) {
+        updateSettlement(periodId: record.weekId, amountCents: record.amountCents, confirmedAt: record.confirmedAt, paidAt: record.paidAt)
     }
 
     private static func allowanceSettings(from record: FamilyRecord) -> AllowanceSettings? {
@@ -2337,7 +2394,8 @@ final class AppStore: ObservableObject {
         decision: ParentDecision.Decision,
         note: String? = nil
     ) async -> Bool {
-        await commitMutation(
+        let historical = occurrence.weekId != weekId
+        let saved = await commitMutation(
             actionTitle: "Save review",
             successMessage: "Review saved across devices.",
             remoteSave: {
@@ -2348,9 +2406,11 @@ final class AppStore: ObservableObject {
                 )
             },
             localCommit: {
-                applyParentDecisionLocally(for: occurrence, decision: decision, note: note)
+                if !historical { applyParentDecisionLocally(for: occurrence, decision: decision, note: note) }
             }
         )
+        if saved && historical { await refreshRemoteFamilyState() }
+        return saved
     }
 
     private func applyParentDecisionLocally(

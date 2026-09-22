@@ -7,6 +7,7 @@ struct EarningsView: View {
     @State private var showingBonusSheet = false
     @State private var showingGoalsSheet = false
     @State private var showingMessageComposer = false
+    @State private var requestMessage = ""
     @State private var selectedSection: EarningsSection
 
     private enum EarningsSection: String, CaseIterable, Identifiable {
@@ -58,7 +59,7 @@ struct EarningsView: View {
             SavingsGoalsSheet(goals: store.savingsGoals).environmentObject(store)
         }
         .sheet(isPresented: $showingMessageComposer) {
-            MessageComposerView(body: store.allowanceRequestMessage)
+            MessageComposerView(body: requestMessage)
         }
     }
 
@@ -100,12 +101,13 @@ struct EarningsView: View {
             }
 
             if !allowsBonusActions {
-                AllowanceRequestCard(
-                    summary: store.allowanceSummary,
-                    nextAllowanceDate: store.nextAllowanceDate,
-                    messageBody: store.allowanceRequestMessage
-                ) {
-                    showingMessageComposer = true
+                ForEach(store.requestableAllowancePeriods) { payable in
+                    if let message = payable.paymentRequestMessage(parentName: store.parentName) {
+                        AllowanceRequestCard(period: payable, messageBody: message) {
+                            requestMessage = message
+                            showingMessageComposer = true
+                        }
+                    }
                 }
             }
 
@@ -263,10 +265,10 @@ private struct AllowancePeriodHistoryRow: View {
             Spacer(minLength: 12)
 
             VStack(alignment: .trailing, spacing: 5) {
-                Text(Money.dollars(period.displayedBalanceCents))
+                Text(Money.dollars(period.settlement?.amountCents ?? period.summary.currentTotalCents))
                     .font(.title3.weight(.heavy))
                     .foregroundStyle(Color.inkBlack)
-                Text("Final")
+                Text(period.settlement == nil ? "Needs review" : (period.settlement?.paidAt == nil ? "Ready to pay" : "Paid"))
                     .font(.caption2.weight(.bold))
                     .foregroundStyle(Color.mutedGray)
             }
@@ -285,16 +287,33 @@ private struct AllowancePeriodHistoryRow: View {
 }
 
 private struct AllowancePeriodDetailView: View {
-    var period: AllowancePeriod
+    @EnvironmentObject private var store: AppStore
+    var initialPeriod: AllowancePeriod
+    @State private var isSaving = false
+    @State private var reviewTasks: [TaskOccurrence] = []
+    @State private var loadingReviews = true
+    @State private var loadError: String?
+    @State private var confirmingAmount = false
+    @State private var confirmingPayment = false
+
+    init(period: AllowancePeriod) { initialPeriod = period }
+
+    private var period: AllowancePeriod {
+        store.allowancePeriods.first { $0.id == initialPeriod.id } ?? initialPeriod
+    }
+
+    private var unresolved: [TaskOccurrence] {
+        reviewTasks.filter { [.upcoming, .due, .submitted, .aiReviewed].contains($0.status) }
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Final Balance")
+                    Text(period.settlement == nil ? "Period Balance" : "Confirmed Balance")
                         .font(.caption.weight(.bold))
                         .foregroundStyle(Color.brandWhite.opacity(0.8))
-                    Text(Money.dollars(period.displayedBalanceCents))
+                    Text(Money.dollars(period.settlement?.amountCents ?? period.summary.currentTotalCents))
                         .font(.system(size: 38, weight: .heavy, design: .rounded))
                         .foregroundStyle(Color.brandWhite)
                     Text(periodDateRange(period))
@@ -315,8 +334,51 @@ private struct AllowancePeriodDetailView: View {
 
                 AllowanceSummaryRows(
                     summary: period.summary,
-                    closeoutAdjustmentCents: period.closeoutAdjustmentCents
+                    closeoutAdjustmentCents: nil
                 )
+                if store.isParentSession {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label("Payment closeout", systemImage: "checkmark.seal.fill")
+                            .font(.headline)
+                        if let settlement = period.settlement {
+                            Text("Locked amount: \(Money.dollars(settlement.amountCents))")
+                            Text(settlement.paidAt == nil ? "Ready for payment" : (settlement.amountCents == 0 ? "Closed without payment" : "Marked paid"))
+                                .foregroundStyle(settlement.paidAt == nil ? Color.warmOrange : Color.green)
+                            if settlement.paidAt == nil {
+                                Button {
+                                    confirmingPayment = true
+                                } label: {
+                                    Label(settlement.amountCents == 0 ? "Close Without Payment" : "Mark Paid", systemImage: "checkmark.circle.fill")
+                                }
+                                .disabled(isSaving)
+                            } else if let paidAt = settlement.paidAt {
+                                Text(paidAt.formatted(date: .abbreviated, time: .shortened))
+                                    .font(.caption).foregroundStyle(Color.mutedGray)
+                            }
+                        } else {
+                            Text(unresolved.isEmpty ? "Confirm \(Money.dollars(period.summary.currentTotalCents)) for this period." : "\(unresolved.count) chores need a decision.")
+                                .foregroundStyle(Color.mutedGray)
+                            if loadingReviews { ProgressView() }
+                            if let loadError { Text(loadError).foregroundStyle(.red) }
+                            ForEach(reviewTasks.filter { $0.status.needsParentReview || $0.status.isOpen }) { task in
+                                NavigationLink {
+                                    ParentTaskReviewView(occurrenceId: task.id)
+                                } label: {
+                                    Label(store.chore(id: task.choreDefinitionId)?.title ?? "Chore", systemImage: "checklist")
+                                }
+                            }
+                            Button {
+                                confirmingAmount = true
+                            } label: {
+                                Label("Confirm Amount", systemImage: "lock.fill")
+                            }
+                            .disabled(isSaving || loadingReviews || loadError != nil || !unresolved.isEmpty || !store.canAttemptRemoteRefresh)
+                        }
+                    }
+                    .padding(18)
+                    .background(Color.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .disabled(store.isMutationInFlight)
+                }
                 AllowanceDailyActivityView(period: period)
                 AllowanceLedgerView(entries: period.entries)
             }
@@ -325,6 +387,32 @@ private struct AllowancePeriodDetailView: View {
         .background(Color.paperWhite.ignoresSafeArea())
         .navigationTitle("Period Details")
         .navigationBarTitleDisplayMode(.inline)
+        .task {
+            loadingReviews = true
+            defer { loadingReviews = false }
+            guard store.canAttemptRemoteRefresh else {
+                reviewTasks = store.occurrences.filter { $0.weekId == period.id }
+                loadError = "Sign in to confirm allowance."
+                return
+            }
+            do {
+                await store.refreshRemoteFamilyState()
+                reviewTasks = try await store.loadPeriodReviews(period)
+                loadError = nil
+            } catch { loadError = error.localizedDescription }
+        }
+        .confirmationDialog("Lock this allowance amount?", isPresented: $confirmingAmount, titleVisibility: .visible) {
+            Button("Confirm \(Money.dollars(period.summary.currentTotalCents))") {
+                isSaving = true
+                Task { _ = await store.confirmAllowancePeriod(period); isSaving = false }
+            }
+        } message: { Text("The period's chores and allowance entries will be locked.") }
+        .confirmationDialog("Record payment?", isPresented: $confirmingPayment, titleVisibility: .visible) {
+            Button(period.settlement?.amountCents == 0 ? "Close Without Payment" : "I've Paid \(Money.dollars(period.settlement?.amountCents ?? 0))") {
+                isSaving = true
+                Task { _ = await store.markAllowancePaid(period); isSaving = false }
+            }
+        } message: { Text("Only record payment after sending the money. This action does not transfer money.") }
     }
 }
 
@@ -525,8 +613,7 @@ private func dayActivityColor(_ row: AllowanceDayActivity) -> Color {
 }
 
 struct AllowanceRequestCard: View {
-    var summary: AllowanceSummary
-    var nextAllowanceDate: Date
+    var period: AllowancePeriod
     var messageBody: String
     var onRequest: () -> Void
 
@@ -537,11 +624,11 @@ struct AllowanceRequestCard: View {
                 .foregroundStyle(Color.inkBlack)
 
             VStack(alignment: .leading, spacing: 6) {
-                Text(summary.hasRolloverDebt ? "This period closes at $0.00" : "You earned \(Money.dollars(summary.currentTotalCents))")
+                Text("You earned \(Money.dollars(period.settlement?.amountCents ?? 0))")
                     .font(.system(size: 28, weight: .heavy, design: .rounded))
                     .foregroundStyle(Color.inkBlack)
 
-                Text(summary.hasRolloverDebt ? "Next period starts reduced by \(Money.dollars(summary.rolloverDebtCents))." : "Next allowance day is \(nextAllowanceDate.formatted(date: .abbreviated, time: .omitted)).")
+                Text(periodDateRange(period))
                     .font(.subheadline)
                     .foregroundStyle(Color.mutedGray)
             }

@@ -448,6 +448,7 @@ public struct AllowancePeriod: Identifiable, Codable, Equatable, Sendable {
     public var archivedAt: Date?
     public var finalBalanceCents: Int?
     public var entries: [LedgerEntry]
+    public var settlement: AllowanceSettlement?
 
     public init(
         id: UUID = UUID(),
@@ -458,7 +459,8 @@ public struct AllowancePeriod: Identifiable, Codable, Equatable, Sendable {
         baseAllowanceCents: Int,
         archivedAt: Date? = nil,
         finalBalanceCents: Int? = nil,
-        entries: [LedgerEntry] = []
+        entries: [LedgerEntry] = [],
+        settlement: AllowanceSettlement? = nil
     ) {
         self.id = id
         self.familyId = familyId
@@ -469,6 +471,7 @@ public struct AllowancePeriod: Identifiable, Codable, Equatable, Sendable {
         self.archivedAt = archivedAt
         self.finalBalanceCents = finalBalanceCents
         self.entries = entries
+        self.settlement = settlement
     }
 
     public var isArchived: Bool {
@@ -480,7 +483,17 @@ public struct AllowancePeriod: Identifiable, Codable, Equatable, Sendable {
     }
 
     public var displayedBalanceCents: Int {
-        finalBalanceCents ?? summary.currentTotalCents
+        settlement?.amountCents ?? finalBalanceCents ?? summary.currentTotalCents
+    }
+
+    public var canRequestPayment: Bool {
+        isArchived && settlement.map { $0.amountCents > 0 && $0.paidAt == nil } == true
+    }
+
+    public func paymentRequestMessage(parentName: String) -> String? {
+        guard canRequestPayment, let settlement else { return nil }
+        let range = "\(startsAt.formatted(date: .abbreviated, time: .omitted)) to \(endsAt.formatted(date: .abbreviated, time: .omitted))"
+        return "Hi \(parentName), my confirmed \(AppBrand.displayName) allowance for \(range) is \(Money.dollars(settlement.amountCents)). Can you send it via Apple Cash?"
     }
 
     public var closeoutAdjustmentCents: Int? {
@@ -490,6 +503,18 @@ public struct AllowancePeriod: Identifiable, Codable, Equatable, Sendable {
 
         let adjustment = finalBalanceCents - summary.currentTotalCents
         return adjustment == 0 ? nil : adjustment
+    }
+}
+
+public struct AllowanceSettlement: Codable, Equatable, Sendable {
+    public var amountCents: Int
+    public var confirmedAt: Date
+    public var paidAt: Date?
+
+    public init(amountCents: Int, confirmedAt: Date, paidAt: Date? = nil) {
+        self.amountCents = amountCents
+        self.confirmedAt = confirmedAt
+        self.paidAt = paidAt
     }
 }
 

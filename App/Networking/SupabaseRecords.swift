@@ -64,6 +64,24 @@ struct WeekRecord: Codable, Identifiable, Sendable {
     }
 }
 
+struct AllowanceSettlementRecord: Codable, Identifiable, Sendable {
+    let weekId: UUID
+    let amountCents: Int
+    let confirmedAt: Date
+    let confirmedBy: UUID
+    let paidAt: Date?
+    let paidBy: UUID?
+    var id: UUID { weekId }
+    enum CodingKeys: String, CodingKey {
+        case weekId = "week_id"
+        case amountCents = "amount_cents"
+        case confirmedAt = "confirmed_at"
+        case confirmedBy = "confirmed_by"
+        case paidAt = "paid_at"
+        case paidBy = "paid_by"
+    }
+}
+
 struct ChildProfileRecord: Codable, Identifiable, Sendable {
     var savingsGoals: [SavingsGoal]? = nil
     let id: UUID
@@ -485,4 +503,15 @@ struct ChoreExcuseRequestResponse: Decodable, Sendable {
         case status
         case excuseReason = "excuse_reason"
     }
+}
+
+struct ConfirmAllowanceParams: Encodable, Sendable {
+    let targetWeekId: UUID
+    let expectedAmountCents: Int
+    enum CodingKeys: String, CodingKey { case targetWeekId = "target_week_id"; case expectedAmountCents = "expected_amount_cents" }
+}
+
+struct MarkAllowancePaidParams: Encodable, Sendable {
+    let targetWeekId: UUID
+    enum CodingKeys: String, CodingKey { case targetWeekId = "target_week_id" }
 }
