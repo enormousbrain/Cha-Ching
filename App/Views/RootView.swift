@@ -31,6 +31,7 @@ struct RootView: View {
             if !$0 {
                 store.reminderChoreIds = nil
                 store.reminderOccurrenceId = nil
+                store.showingCatchUp = false
             }
         })) {
             ReminderChoreListView()

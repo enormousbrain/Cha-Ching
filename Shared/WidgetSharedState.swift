@@ -14,6 +14,7 @@ struct ChaChingWidgetSnapshot: Codable, Equatable {
     var nextChoreTime: String
     var trend: [AllowanceTrendPoint]? = nil
     var periodEndsAt: Date? = nil
+    var authenticatedUserId: UUID? = nil
 
     var progress: Double {
         guard baseCents > 0 else { return 0 }
@@ -109,7 +110,9 @@ enum ChaChingWidgetSharedState {
             return nil
         }
 
-        return try? JSONDecoder().decode(ChaChingWidgetSnapshot.self, from: data)
+        guard let snapshot = try? JSONDecoder().decode(ChaChingWidgetSnapshot.self, from: data),
+              snapshot.authenticatedUserId != nil else { return nil }
+        return snapshot
     }
 
     static func clearSnapshot() {

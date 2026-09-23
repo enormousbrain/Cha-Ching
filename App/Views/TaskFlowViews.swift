@@ -20,6 +20,12 @@ struct TaskDetailView: View {
                     VStack(alignment: .leading, spacing: 22) {
                         taskHero(chore: chore)
 
+                        if occurrence.status == .missed {
+                            Text("You can still submit this chore. Your parent will review it before restoring any deduction.")
+                                .font(.subheadline)
+                                .foregroundStyle(Color.mutedGray)
+                        }
+
                         VStack(spacing: 12) {
                             detailMetric(title: "Keep", value: "No deduction", color: .acidLime)
                             detailMetric(title: "Miss it", value: Money.dollars(-chore.deductionCents, signed: true), color: .warmOrange)
@@ -54,6 +60,7 @@ struct TaskDetailView: View {
                                     .background(Color.brandBlack, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                             }
                             .buttonStyle(.plain)
+                            .disabled(!store.canSubmit(occurrence) || store.isMutationInFlight)
                         }
 
                         if store.allowsNoPhotoSubmission(for: chore) {
@@ -73,7 +80,7 @@ struct TaskDetailView: View {
                                 .background(Color.acidLime, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                             }
                             .buttonStyle(.plain)
-                            .disabled(isSubmittingWithoutPhoto || !occurrence.status.isOpen)
+                            .disabled(isSubmittingWithoutPhoto || !store.canSubmit(occurrence))
                         }
 
                         Button {

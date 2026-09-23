@@ -35,6 +35,16 @@ final class ChoreReminderPlannerTests: XCTestCase {
         }
     }
 
+    func testCatchUpReminderIsOncePerDayAndRespectsQuietHours() {
+        XCTAssertEqual(ChoreReminderPlanner.catchUpReminderDate(now: now, lastScheduledAt: nil, calendar: calendar), date(2026, 9, 20, 17, 0))
+        let evening = date(2026, 9, 20, 18, 0)
+        XCTAssertEqual(ChoreReminderPlanner.catchUpReminderDate(now: evening, lastScheduledAt: nil, calendar: calendar), date(2026, 9, 20, 18, 1))
+        XCTAssertNil(ChoreReminderPlanner.catchUpReminderDate(now: evening, lastScheduledAt: date(2026, 9, 20, 17, 0), calendar: calendar))
+        XCTAssertEqual(ChoreReminderPlanner.catchUpReminderDate(now: date(2026, 9, 20, 21, 0), lastScheduledAt: nil, calendar: calendar), date(2026, 9, 21, 17, 0))
+        XCTAssertNil(ChoreReminderPlanner.catchUpReminderDate(now: evening, lastScheduledAt: date(2026, 9, 21, 17, 0), calendar: calendar))
+        XCTAssertEqual(ChoreReminderPlanner.catchUpReminderDate(now: now, lastScheduledAt: date(2026, 9, 19, 17, 0), calendar: calendar), date(2026, 9, 20, 17, 0))
+    }
+
     func testPausedArchivedAndOtherChildAreExcluded() {
         var paused = chore(); paused.isPaused = true
         var archived = chore(); archived.archivedAt = now

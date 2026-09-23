@@ -6,6 +6,7 @@ private struct ReminderSnapshot: Codable {
     var owner: String
     var items: [ChoreReminderItem]
     var goals: [SavingsGoal]? = nil
+    var catchUpIds: [UUID]? = nil
 }
 
 struct ReminderHome: Codable {
@@ -30,6 +31,7 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
     private var wantsCurrentLocation = false
     private var onOpen: (([UUID]) -> Void)?
     private var onNudge: ((UUID) -> Void)?
+    private var onCatchUp: (() -> Void)?
     @Published private(set) var home: ReminderHome?
     @Published private(set) var homeEnabled = false
     @Published private(set) var isLocating = false
@@ -47,15 +49,16 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
         location.delegate = self
     }
 
-    func configure(onOpen: @escaping ([UUID]) -> Void, onNudge: @escaping (UUID) -> Void) {
+    func configure(onOpen: @escaping ([UUID]) -> Void, onNudge: @escaping (UUID) -> Void, onCatchUp: @escaping () -> Void) {
         self.onOpen = onOpen
         self.onNudge = onNudge
+        self.onCatchUp = onCatchUp
         center.delegate = self
         registerActions()
     }
 
-    func update(owner: String, items: [ChoreReminderItem], goals: [SavingsGoal] = []) {
-        if snapshot?.owner != owner || snapshot?.items != items || snapshot?.goals != goals { revision += 1 }
+    func update(owner: String, items: [ChoreReminderItem], goals: [SavingsGoal] = [], catchUpIds: [UUID] = []) {
+        if snapshot?.owner != owner || snapshot?.items != items || snapshot?.goals != goals || snapshot?.catchUpIds != catchUpIds { revision += 1 }
         if let snapshot, snapshot.owner != owner {
             setArmedHomeKeys([])
             delays = [:]
@@ -63,7 +66,7 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
             homeEnabled = false
             persistHome()
         }
-        snapshot = ReminderSnapshot(owner: owner, items: items, goals: goals)
+        snapshot = ReminderSnapshot(owner: owner, items: items, goals: goals, catchUpIds: catchUpIds)
         let ids = Set(items.map(\.id))
         delays = delays.filter { ids.contains($0.key) }
         save(snapshot, "snapshot")
@@ -179,6 +182,25 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
                 ))
             }
         }
+        let catchUpIdentifier = Self.prefix + "catchup"
+        if let snapshot, let missed = snapshot.catchUpIds, !missed.isEmpty {
+            let existing = managed.first { $0.identifier == catchUpIdentifier && $0.content.userInfo["owner"] as? String == snapshot.owner }
+            let lastAlert: Date? = read("catchup.\(snapshot.owner)")
+            if let existing {
+                let content = existing.content.mutableCopy() as! UNMutableNotificationContent
+                content.body = "\(missed.count) missed \(missed.count == 1 ? "chore is" : "chores are") waiting. Take them one at a time, then send them for review."
+                requests.append(UNNotificationRequest(identifier: catchUpIdentifier, content: content, trigger: existing.trigger))
+            } else if let fireAt = ChoreReminderPlanner.catchUpReminderDate(now: now, lastScheduledAt: lastAlert) {
+                let content = UNMutableNotificationContent()
+                content.title = "A little catch-up time"
+                content.body = "\(missed.count) missed \(missed.count == 1 ? "chore is" : "chores are") waiting. Take them one at a time, then send them for review."
+                content.sound = .default
+                content.threadIdentifier = "chaching.catchup"
+                content.userInfo = ["kind": "catch_up", "owner": snapshot.owner]
+                requests.append(UNNotificationRequest(identifier: catchUpIdentifier, content: content,
+                    trigger: UNCalendarNotificationTrigger(dateMatching: Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: fireAt), repeats: false)))
+            }
+        }
         let desired = Set(requests.map(\.identifier))
         center.removePendingNotificationRequests(withIdentifiers: managed.filter { !desired.contains($0.identifier) }.map(\.identifier))
         for request in requests {
@@ -189,12 +211,18 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
                 continue
             }
             try await center.add(request)
+            if request.identifier == catchUpIdentifier, let fireAt = (request.trigger as? UNCalendarNotificationTrigger)?.nextTriggerDate(), let owner = snapshot?.owner {
+                save(fireAt, "catchup.\(owner)")
+            }
         }
         guard revision == self.revision else { return }
         setArmedHomeKeys(desired.contains(Self.prefix + "home") ? homeItems.map(\.id) : [])
         center.removeDeliveredNotifications(withIdentifiers: delivered.filter { notification in
             guard notification.request.identifier.hasPrefix(Self.prefix) else { return false }
             if notification.request.content.userInfo["owner"] as? String != snapshot?.owner { return true }
+            if notification.request.content.userInfo["kind"] as? String == "catch_up" {
+                return snapshot?.catchUpIds?.isEmpty != false
+            }
             let keys = notification.request.content.userInfo["items"] as? [String] ?? []
             return !keys.contains(where: ids.contains)
         }.map { $0.request.identifier })
@@ -273,6 +301,11 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
         onNudge?(id)
     }
 
+    private func openCatchUp(owner: String) {
+        guard snapshot?.owner == owner else { return }
+        onCatchUp?()
+    }
+
     var hasLocationPermission: Bool {
         location.authorizationStatus == .authorizedWhenInUse || location.authorizationStatus == .authorizedAlways
     }
@@ -330,6 +363,7 @@ struct ReminderChoreListView: View {
     @Environment(\.dismiss) private var dismiss
 
     private var chores: [TaskOccurrence] {
+        if store.showingCatchUp { return store.catchUpOccurrences }
         if let id = store.reminderOccurrenceId {
             return store.occurrences.filter { $0.id == id }
         }
@@ -348,7 +382,7 @@ struct ReminderChoreListView: View {
                     } label: {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(store.chore(for: occurrence).title).font(.headline)
-                            Text(occurrence.dueAt, style: .time).foregroundStyle(.secondary)
+                            Text(occurrence.dueAt.formatted(date: .abbreviated, time: .shortened)).foregroundStyle(.secondary)
                         }
                     }
                 }
@@ -359,7 +393,7 @@ struct ReminderChoreListView: View {
                     else { ContentUnavailableView("Nothing waiting here", systemImage: "checkmark.circle") }
                 }
             }
-            .navigationTitle("Your Chores")
+            .navigationTitle(store.showingCatchUp ? "Catch Up" : "Your Chores")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .task { await store.loadRemoteFamilyStateIfSignedIn(force: true) }
         }
@@ -373,6 +407,10 @@ extension ChoreReminderCenter: UNUserNotificationCenterDelegate {
         let owner = info["owner"] as? String ?? ""
         let arrival = info["arrival"] as? Bool ?? false
         let action = response.actionIdentifier
+        if info["kind"] as? String == "catch_up", action == UNNotificationDefaultActionIdentifier {
+            await openCatchUp(owner: owner)
+            return
+        }
         if info["kind"] as? String == "task_nudge", action == UNNotificationDefaultActionIdentifier {
             await openNudge(occurrenceId: info["task_occurrence_id"] as? String ?? "", owner: owner)
             return

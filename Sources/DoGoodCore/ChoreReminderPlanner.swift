@@ -26,6 +26,16 @@ public struct ChoreReminderBatch: Equatable, Sendable {
 }
 
 public enum ChoreReminderPlanner {
+    public static func catchUpReminderDate(now: Date, lastScheduledAt: Date?, calendar: Calendar = .current) -> Date? {
+        if let lastScheduledAt, lastScheduledAt >= calendar.startOfDay(for: now) { return nil }
+        let today = calendar.startOfDay(for: now)
+        guard let evening = calendar.date(bySettingHour: 17, minute: 0, second: 0, of: today),
+              let quietTime = calendar.date(bySettingHour: 20, minute: 0, second: 0, of: today) else { return nil }
+        let soon = now.addingTimeInterval(60)
+        if soon >= quietTime { return calendar.date(byAdding: .day, value: 1, to: evening) }
+        return max(evening, soon)
+    }
+
     public static func items(
         chores: [ChoreDefinition], occurrences: [TaskOccurrence], childId: UUID,
         now: Date, calendar: Calendar = .current, days: Int = 14

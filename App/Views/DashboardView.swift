@@ -22,6 +22,7 @@ struct DashboardView: View {
                 if !store.catchUpOccurrences.isEmpty {
                     Button {
                         store.reminderOccurrenceId = nil
+                        store.showingCatchUp = true
                         store.reminderChoreIds = Array(Set(store.catchUpOccurrences.map(\.choreDefinitionId)))
                     } label: {
                         Label("Catch up on \(store.catchUpOccurrences.count) missed \(store.catchUpOccurrences.count == 1 ? "chore" : "chores")", systemImage: "arrow.uturn.forward.circle.fill")

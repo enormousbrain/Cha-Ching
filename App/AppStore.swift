@@ -33,6 +33,7 @@ final class AppStore: ObservableObject {
     @Published var notificationState: NotificationState
     @Published var reminderChoreIds: [UUID]?
     @Published var reminderOccurrenceId: UUID?
+    @Published var showingCatchUp = false
     @Published private(set) var savingsGoals: [SavingsGoal] = []
     @Published var familySyncState: FamilySyncState
     @Published var mutationFailure: MutationFailure?
@@ -47,6 +48,7 @@ final class AppStore: ObservableObject {
     private var remoteRefreshTask: Task<Void, Never>?
     private var remoteRefreshGeneration = UUID()
     private var reminderStateReady = false
+    private var hasLoadedRemoteAllowance = false
     private var pushObserver: NSObjectProtocol?
 
     @Published private(set) var familyId: UUID
@@ -98,6 +100,9 @@ final class AppStore: ObservableObject {
         self.allowanceSettlements = [:]
         self.mutationFailure = nil
         self.activeMutationTitle = nil
+        if ChaChingWidgetSharedState.loadSnapshot()?.authenticatedUserId != SupabaseClientProvider.shared.auth.currentSession?.user.id {
+            clearWidgetSnapshot()
+        }
         #if DEBUG
         reminderStateReady = SupabaseClientProvider.shared.auth.currentSession == nil
         #endif
@@ -197,6 +202,11 @@ final class AppStore: ObservableObject {
             .sorted { ($0.dueAt, $0.id.uuidString) < ($1.dueAt, $1.id.uuidString) }
     }
 
+    func canSubmit(_ occurrence: TaskOccurrence) -> Bool {
+        occurrence.childId == childId && allowanceSettlements[occurrence.weekId] == nil
+            && (occurrence.status.isOpen || occurrence.status == .missed)
+    }
+
     var pendingReviewOccurrences: [TaskOccurrence] {
         occurrences.filter { $0.status.needsParentReview && allowanceSettlements[$0.weekId] == nil }
     }
@@ -234,6 +244,7 @@ final class AppStore: ObservableObject {
 
     func loadRemoteFamilyStateIfSignedIn(force: Bool = false) async {
         guard SupabaseClientProvider.shared.auth.currentSession != nil else {
+            clearWidgetSnapshot()
             familySyncState = .localPreview
             return
         }
@@ -329,6 +340,8 @@ final class AppStore: ObservableObject {
 
             guard remoteRefreshGeneration == generation else { return }
             guard let membership = memberships.first else {
+                hasLoadedRemoteAllowance = false
+                clearWidgetSnapshot()
                 familySyncState = .needsBootstrap("Signed in. Create your remote family to sync across devices.")
                 return
             }
@@ -466,6 +479,8 @@ final class AppStore: ObservableObject {
 
         do {
             try await remoteStore.signOut()
+            hasLoadedRemoteAllowance = false
+            clearWidgetSnapshot()
             reminderStateReady = false
             await ChoreReminderCenter.shared.clear()
             applyLocalPreviewState()
@@ -772,6 +787,9 @@ final class AppStore: ObservableObject {
         for occurrenceId: UUID,
         jpegData: Data? = nil
     ) async -> EvidenceSubmissionOutcome {
+        guard let occurrence = occurrences.first(where: { $0.id == occurrenceId }), canSubmit(occurrence) else {
+            return .failed("This chore is no longer available to submit.")
+        }
         if let jpegData {
             do {
                 return try await submitRemoteEvidence(
@@ -797,6 +815,10 @@ final class AppStore: ObservableObject {
     }
 
     func submitWithoutPhoto(for occurrenceId: UUID) async {
+        guard let occurrence = occurrences.first(where: { $0.id == occurrenceId }), canSubmit(occurrence) else {
+            failMutation(actionTitle: "Submit chore", message: "This chore is no longer available to submit. Refresh the chore list and try again.")
+            return
+        }
         do {
             guard SupabaseClientProvider.shared.auth.currentSession != nil else {
                 #if DEBUG
@@ -817,11 +839,7 @@ final class AppStore: ObservableObject {
             )
         } catch {
             debugPrint("Remote no-photo submission failed:", error.localizedDescription)
-            #if DEBUG
-            submitLocalCompletion(for: occurrenceId)
-            #else
-            familySyncState = .failed("The chore could not be submitted. Check the connection and try again.")
-            #endif
+            failMutation(actionTitle: "Submit chore", message: "The chore could not be submitted. Check the connection and refresh the chore list before trying again.")
         }
     }
 
@@ -1265,7 +1283,8 @@ final class AppStore: ObservableObject {
     private func updateChoreReminders() {
         let items = ChoreReminderPlanner.items(chores: chores, occurrences: occurrences, childId: childId, now: Date())
         ChoreReminderCenter.shared.update(owner: "\(session.userId).\(familyId).\(childId)", items: items,
-                                         goals: isChildSession ? savingsGoals : [])
+                                         goals: isChildSession ? savingsGoals : [],
+                                         catchUpIds: isChildSession ? catchUpOccurrences.map(\.id) : [])
     }
 
     private func processPendingTaskNudges(familyId: UUID, childId: UUID) async {
@@ -1733,6 +1752,7 @@ final class AppStore: ObservableObject {
             saveAllowanceSettings()
         }
 
+        hasLoadedRemoteAllowance = true
         publishWidgetSnapshot()
         await syncAPNsDeviceToken()
         guard remoteRefreshGeneration == generation else { return }
@@ -2304,6 +2324,9 @@ final class AppStore: ObservableObject {
     }
 
     private func publishWidgetSnapshot() {
+        // Startup and failed refreshes must preserve the last authenticated balance.
+        guard hasLoadedRemoteAllowance, activeAllowancePeriod != nil,
+              session.userId == SupabaseClientProvider.shared.auth.currentSession?.user.id else { return }
         if reminderStateReady {
             updateChoreReminders()
             Task { await refreshNotificationScheduleIfAuthorized() }
@@ -2322,13 +2345,21 @@ final class AppStore: ObservableObject {
             nextChoreTitle: nextChore?.shortTitle ?? "All done",
             nextChoreTime: nextOccurrence.map { Self.widgetTimeFormatter.string(from: $0.dueAt) } ?? "Nice work",
             trend: allowanceTrend,
-            periodEndsAt: activeAllowancePeriod?.endsAt
+            periodEndsAt: activeAllowancePeriod?.endsAt,
+            authenticatedUserId: session.userId
         )
 
         guard ChaChingWidgetSharedState.saveSnapshot(snapshot) else {
             return
         }
 
+        #if canImport(WidgetKit)
+        WidgetCenter.shared.reloadTimelines(ofKind: ChaChingWidgetSharedState.widgetKind)
+        #endif
+    }
+
+    private func clearWidgetSnapshot() {
+        ChaChingWidgetSharedState.clearSnapshot()
         #if canImport(WidgetKit)
         WidgetCenter.shared.reloadTimelines(ofKind: ChaChingWidgetSharedState.widgetKind)
         #endif

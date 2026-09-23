@@ -14,6 +14,7 @@ struct ChaChingAllowanceEntry: TimelineEntry {
     let nextChoreTime: String
     var trend: [AllowanceTrendPoint] = []
     var periodEndsAt: Date? = nil
+    var hasData = true
 
     var progress: Double {
         guard baseCents > 0 else { return 0 }
@@ -38,11 +39,11 @@ struct ChaChingAllowanceEntry: TimelineEntry {
 
 struct ChaChingAllowanceProvider: TimelineProvider {
     func placeholder(in context: Context) -> ChaChingAllowanceEntry {
-        sampleEntry
+        emptyEntry
     }
 
     func getSnapshot(in context: Context, completion: @escaping (ChaChingAllowanceEntry) -> Void) {
-        completion(context.isPreview ? sampleEntry : currentEntry)
+        completion(currentEntry)
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<ChaChingAllowanceEntry>) -> Void) {
@@ -74,31 +75,10 @@ struct ChaChingAllowanceProvider: TimelineProvider {
             date: Date(), periodTitle: "No allowance yet", childName: "",
             currentCents: 0, baseCents: 0, rolloverDebtCents: 0, choresLeft: 0,
             nextChoreTitle: "Sign in to sync", nextChoreTime: "",
-            trend: [], periodEndsAt: nil
+            trend: [], periodEndsAt: nil, hasData: false
         )
     }
 
-    private var sampleEntry: ChaChingAllowanceEntry {
-        ChaChingAllowanceEntry(
-            date: Date(),
-            periodTitle: "This Week",
-            childName: "Zoe",
-            currentCents: 1_350,
-            baseCents: 1_500,
-            rolloverDebtCents: 0,
-            choresLeft: 2,
-            nextChoreTitle: "Take Dog Out",
-            nextChoreTime: "8:00 PM",
-            trend: [
-                AllowanceTrendPoint(date: Date().addingTimeInterval(-4 * 86400), cents: 1500, title: "Starting allowance"),
-                AllowanceTrendPoint(date: Date().addingTimeInterval(-3 * 86400), cents: 1400, title: "Deduction"),
-                AllowanceTrendPoint(date: Date().addingTimeInterval(-2 * 86400), cents: 1600, title: "Bonus"),
-                AllowanceTrendPoint(date: Date().addingTimeInterval(-86400), cents: 1350, title: "Deduction"),
-                AllowanceTrendPoint(date: Date(), cents: 1350, title: "Current balance")
-            ],
-            periodEndsAt: Date().addingTimeInterval(2 * 86400)
-        )
-    }
 }
 
 struct ChaChingAllowanceWidgetView: View {
@@ -106,31 +86,38 @@ struct ChaChingAllowanceWidgetView: View {
     var entry: ChaChingAllowanceEntry
 
     var body: some View {
-        if entry.baseCents == 0 {
+        if !entry.hasData {
             emptyWidget
         } else {
-        switch family {
-        case .systemSmall:
-            smallWidget
-        case .accessoryCircular:
-            accessoryCircular
-        case .accessoryRectangular:
-            accessoryRectangular
-        default:
-            mediumWidget
-        }
+            switch family {
+            case .systemSmall:
+                smallWidget
+            case .accessoryCircular:
+                accessoryCircular
+            case .accessoryRectangular:
+                accessoryRectangular
+            default:
+                mediumWidget
+            }
         }
     }
 
     private var emptyWidget: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("ChaChing")
-                .font(.headline.weight(.heavy))
-            Text("Sign in to see allowance progress.")
-                .font(.caption)
-                .foregroundStyle(Color.ccMuted)
+        Group {
+            if family == .accessoryCircular {
+                Image(systemName: "arrow.clockwise")
+                    .accessibilityLabel("Open ChaChing to sync allowance")
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("ChaChing")
+                        .font(.headline.weight(.heavy))
+                    Text("Open app to sync")
+                        .font(.caption)
+                        .foregroundStyle(Color.ccMuted)
+                }
+                .padding(family == .accessoryRectangular ? 0 : 14)
+            }
         }
-        .padding(14)
         .containerBackground(Color.ccPaper, for: .widget)
     }
 

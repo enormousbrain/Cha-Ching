@@ -11,10 +11,16 @@ struct ChaChingApp: App {
         let store = AppStore()
         _store = StateObject(wrappedValue: store)
         ChoreReminderCenter.shared.configure(onOpen: { [weak store] choreIds in
+            store?.showingCatchUp = false
             store?.reminderOccurrenceId = nil
             store?.reminderChoreIds = choreIds
         }, onNudge: { [weak store] occurrenceId in
+            store?.showingCatchUp = false
             store?.reminderOccurrenceId = occurrenceId
+            store?.reminderChoreIds = []
+        }, onCatchUp: { [weak store] in
+            store?.showingCatchUp = true
+            store?.reminderOccurrenceId = nil
             store?.reminderChoreIds = []
         })
         ChaChingBackgroundRefresh.shared.configure(store: store)
