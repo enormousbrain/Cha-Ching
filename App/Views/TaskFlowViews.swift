@@ -6,6 +6,7 @@ struct TaskDetailView: View {
     var occurrenceId: UUID
 
     @State private var isSubmittingWithoutPhoto = false
+    @State private var showingNoPhotoClaim = false
 
     private var occurrence: TaskOccurrence? {
         store.occurrences.first { $0.id == occurrenceId }
@@ -61,6 +62,13 @@ struct TaskDetailView: View {
                             }
                             .buttonStyle(.plain)
                             .disabled(!store.canSubmit(occurrence) || store.isMutationInFlight)
+                        }
+
+                        if store.canSubmit(occurrence) {
+                            Button("I did it, but don't have a photo") { showingNoPhotoClaim = true }
+                                .font(.subheadline.weight(.semibold))
+                                .disabled(store.isMutationInFlight)
+                                .sheet(isPresented: $showingNoPhotoClaim) { NoPhotoClaimSheet(tasks: [occurrence]) }
                         }
 
                         if store.allowsNoPhotoSubmission(for: chore) {
@@ -216,6 +224,8 @@ struct CameraCaptureView: View {
     @State private var isSubmitting = false
     @State private var isCheckingPhotoPrivacy = false
     @State private var privacyAlert: PhotoPrivacyAlert?
+    @State private var showingPhotoConsent = false
+    @State private var resumeCaptureAfterConsent = false
 
     private var occurrence: TaskOccurrence? {
         store.occurrences.first { $0.id == occurrenceId }
@@ -324,6 +334,14 @@ struct CameraCaptureView: View {
             }
             .ignoresSafeArea()
         }
+        .sheet(isPresented: $showingPhotoConsent, onDismiss: {
+            if resumeCaptureAfterConsent {
+                resumeCaptureAfterConsent = false
+                captureTapped()
+            }
+        }) {
+            PhotoSharingConsentView(onAccepted: { resumeCaptureAfterConsent = true })
+        }
         .alert(item: $privacyAlert) { alert in
             Alert(
                 title: Text(alert.title),
@@ -396,10 +414,22 @@ struct CameraCaptureView: View {
             return
         }
 
-        if cameraAvailable {
-            isShowingCamera = true
-        } else {
-            Task {
+        Task {
+            if store.isSignedIn {
+                isSubmitting = true
+                do {
+                    let status = try await store.photoSharingStatus()
+                    isSubmitting = false
+                    guard status.canUpload else { showingPhotoConsent = true; return }
+                } catch {
+                    isSubmitting = false
+                    privacyAlert = .submissionFailed("Couldn't check photo permission. Please try again.")
+                    return
+                }
+            }
+            if cameraAvailable {
+                isShowingCamera = true
+            } else {
                 await submitCapturedImage(nil)
             }
         }

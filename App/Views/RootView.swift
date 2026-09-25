@@ -4,6 +4,7 @@ struct RootView: View {
     @EnvironmentObject private var store: AppStore
 #if DEBUG
     @State private var previewReminders = ProcessInfo.processInfo.environment["CHACHING_REMINDER_SETTINGS"] == "1"
+    @State private var previewPrivacy = ProcessInfo.processInfo.environment["CHACHING_PRIVACY_SETTINGS"] == "1"
 #endif
 
     var body: some View {
@@ -18,6 +19,9 @@ struct RootView: View {
 #if DEBUG
         .sheet(isPresented: $previewReminders) {
             ReminderSettingsView().environmentObject(store)
+        }
+        .sheet(isPresented: $previewPrivacy) {
+            NavigationStack { PrivacyAccountView().environmentObject(store) }
         }
 #endif
         .onOpenURL { url in

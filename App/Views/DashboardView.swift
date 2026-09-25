@@ -19,6 +19,16 @@ struct DashboardView: View {
 
                 quickStats
 
+                if !store.awaitingReviewOccurrences.isEmpty {
+                    Button {
+                        store.showingCatchUp = true
+                        store.reminderOccurrenceId = nil
+                        store.reminderChoreIds = []
+                    } label: {
+                        Label("Awaiting review (\(store.awaitingReviewOccurrences.count))", systemImage: "clock")
+                    }
+                }
+
                 if !store.catchUpOccurrences.isEmpty {
                     Button {
                         store.reminderOccurrenceId = nil
@@ -74,6 +84,12 @@ struct DashboardView: View {
             #endif
 
             ToolbarItemGroup(placement: .topBarTrailing) {
+                NavigationLink {
+                    PrivacyAccountView()
+                } label: {
+                    Image(systemName: "person.crop.circle")
+                }
+                .accessibilityLabel("Privacy and Account")
                 RemoteRefreshButton()
 
                 Button {

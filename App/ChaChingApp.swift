@@ -8,7 +8,35 @@ struct ChaChingApp: App {
     @UIApplicationDelegateAdaptor(ChaChingAppDelegate.self) private var appDelegate
 
     init() {
-        let store = AppStore()
+        let store: AppStore
+        #if DEBUG
+        if let preview = ProcessInfo.processInfo.environment["CHACHING_GROUPED_PREVIEW"], ["child", "parent"].contains(preview) {
+            var snapshot = SeedData.snapshot()
+            snapshot.occurrences = snapshot.chores.prefix(2).flatMap { chore in
+                (1...3).map { day in
+                    let due = Calendar.current.date(byAdding: .day, value: -day, to: Date())!
+                    return TaskOccurrence(choreDefinitionId: chore.id, childId: snapshot.childId,
+                        weekId: snapshot.weekId, scheduledAt: due, dueAt: due, expiresAt: due,
+                        status: preview == "child" ? .missed : .submitted)
+                }
+            }
+            snapshot.submissions = snapshot.occurrences.map { task in
+                ChoreSubmission(taskOccurrenceId: task.id, childId: task.childId, imageName: "no-photo",
+                    reportedDoneNote: "I did this before school but forgot my phone.")
+            }
+            for index in snapshot.occurrences.indices {
+                snapshot.occurrences[index].submissionId = snapshot.submissions[index].id
+            }
+            store = AppStore(snapshot: snapshot)
+            if preview == "child" {
+                store.switchSession(to: .child)
+                store.showingCatchUp = true
+                store.reminderChoreIds = []
+            }
+        } else { store = AppStore() }
+        #else
+        store = AppStore()
+        #endif
         _store = StateObject(wrappedValue: store)
         ChoreReminderCenter.shared.configure(onOpen: { [weak store] choreIds in
             store?.showingCatchUp = false

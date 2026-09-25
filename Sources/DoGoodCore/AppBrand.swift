@@ -1,6 +1,9 @@
 import Foundation
 
 public enum AppBrand {
+    public static let privacyURL = URL(string: "https://enormousbrain.com/cha-ching/privacy/")!
+    public static let supportURL = URL(string: "https://enormousbrain.com/cha-ching/support/")!
+    public static let supportEmailURL = URL(string: "mailto:jesse@enormousbrain.com?subject=ChaChing%20Support")!
     public static let fallbackDisplayName = "ChaChing"
     public static let fallbackInviteBaseURL = URL(string: "https://enormousbrain.com/cha-ching/invite")!
 

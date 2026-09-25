@@ -1,6 +1,6 @@
 # Release Readiness
 
-Updated September 21, 2026. This is a release gate, not a list of completed features.
+Updated September 24, 2026. This is a release gate, not a list of completed features.
 
 ## Implemented, Awaiting Device Verification
 
@@ -16,18 +16,22 @@ Updated September 21, 2026. This is a release gate, not a list of completed feat
 - [ ] Fix local-preview child switching, which currently filters arrays destructively and does not restore a complete per-child context.
 - [x] Replace the current-balance request with server-confirmed closeout, historical reviews, explicit paid status, and idempotent settlement. See [allowance closeout](allowance-closeout.md).
 - [ ] Verify the complete closeout and request flow on parent and child devices. Sending a message must never mark an allowance paid automatically.
-- [ ] Add account deletion with an explicit family-owner/child-data retention policy and authenticated backend enforcement.
-- [ ] Add privacy/support links and explicit cloud-photo-sharing consent before upload. Check retention, deletion, and disclosure behavior end to end.
-- [ ] Bound all reminder categories together, deduplicate location regions, reserve capacity for home reminders, and prevent stale/future chore arrival alerts.
+- [x] Add account deletion with explicit co-parent, last-parent, and child-data handling and authenticated backend enforcement. See [privacy/account settings](privacy-account-settings.md).
+- [ ] Configure the separate Sign in with Apple private key and verify token revocation on a disposable account; verify account deletion and widget clearing on physical devices.
+- [x] Add privacy/support links and explicit server-enforced cloud-photo-sharing consent before upload.
+- [ ] Upload the privacy/support website pages and verify the consent, withdrawal, retention, deletion, and disclosure flow on physical devices.
+- [x] Bound all local reminder categories together, deduplicate location regions, reserve capacity for home reminders, and check cached chore windows before arrival alerts. See [reminder reliability](reminder-reliability.md).
+- [ ] Verify background arrival reminders with optional Always permission on a physical child device, including denial/revocation, snoozes, completion, expiry, and account switching.
 - [ ] Test permission denial, offline/reconnect, timezone/DST changes, weekly/biweekly rollover, and negative carryover.
 - [ ] Test server isolation between two families and between children, including invites, photo access, review actions, and widgets.
-- [ ] Add orphaned-photo cleanup for interrupted uploads and verify grace periods and dispute holds.
+- [x] Add orphaned-photo cleanup for interrupted uploads, excluding registered evidence and coordinating with registration.
+- [ ] Verify grace periods and dispute holds with physical-device evidence submissions.
 - [ ] Replace unsafe missing-chore indexing with an explicit missing/deleted-chore state.
 - [ ] Complete App Store privacy disclosures, review credentials/instructions, screenshots, support pages, service cost estimates, and the pricing decision.
 
 ## Verification This Pass
 
-- Swift package: 37 tests passed, including parent selection persistence policy, family scoping, deleted preference fallback, and child linkage isolation.
-- iOS Simulator Debug build passed.
-- No production database migration or TestFlight upload was performed in this pass.
+- Swift package: 49 tests passed, including reminder budgets/arrival windows, grouped catch-up, parent selection persistence policy, family scoping, deleted preference fallback, and child linkage isolation.
+- iOS Simulator Debug and Release builds passed; reminder settings were visually checked in light and dark mode.
+- Privacy/account deletion migration 0024 and backend functions were deployed during the preceding privacy slice. This reminder slice requires no database migration. No TestFlight upload was performed.
 - Template partial-failure UI and physical-device background behavior still need manual verification.

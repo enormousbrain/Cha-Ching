@@ -7,6 +7,14 @@ private struct ReminderSnapshot: Codable {
     var items: [ChoreReminderItem]
     var goals: [SavingsGoal]? = nil
     var catchUpIds: [UUID]? = nil
+    var allowance: AllowanceReminderSchedule? = nil
+}
+
+struct AllowanceReminderSchedule: Codable, Equatable {
+    var familyId: UUID
+    var childName: String
+    var date: Date
+    var repeatsWeekly: Bool
 }
 
 struct ReminderHome: Codable {
@@ -27,7 +35,10 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
     private var delays: [String: ChoreReminderDelay] = [:]
     private var scheduleTask: Task<Void, Error>?
     private var revision = 0
-    private var armedHomeKeys: [String] = []
+    private var alertedArrivalIDs: Set<String> = []
+    private var immediateRequests: [String: UNNotificationRequest] = [:]
+    private var lastScheduledIDs: Set<String> = []
+    private var arrivalsInFlight: Set<String> = []
     private var wantsCurrentLocation = false
     private var onOpen: (([UUID]) -> Void)?
     private var onNudge: ((UUID) -> Void)?
@@ -38,15 +49,17 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
     @Published private(set) var message: String?
     @Published private(set) var scheduledCount = 0
     @Published private(set) var nextReminderAt: Date?
+    @Published private(set) var locationAuthorization: CLAuthorizationStatus = .notDetermined
 
     private override init() {
         super.init()
         snapshot = read("snapshot")
         delays = read("delays") ?? [:]
-        armedHomeKeys = read("armedHomeKeys") ?? []
+        alertedArrivalIDs = Set(read("alertedArrivalIDs") as [String]? ?? [])
         home = read("home")
         homeEnabled = defaults.bool(forKey: Self.prefix + "homeEnabled")
         location.delegate = self
+        locationAuthorization = location.authorizationStatus
     }
 
     func configure(onOpen: @escaping ([UUID]) -> Void, onNudge: @escaping (UUID) -> Void, onCatchUp: @escaping () -> Void) {
@@ -55,27 +68,40 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
         self.onCatchUp = onCatchUp
         center.delegate = self
         registerActions()
+        Task {
+            let currentUser = SupabaseClientProvider.shared.auth.currentSession?.user.id.uuidString
+            if let owner = snapshot?.owner, !owner.hasPrefix((currentUser ?? "signed-out") + ".") {
+                await clear()
+            } else {
+                try? await schedule()
+            }
+        }
     }
 
-    func update(owner: String, items: [ChoreReminderItem], goals: [SavingsGoal] = [], catchUpIds: [UUID] = []) {
-        if snapshot?.owner != owner || snapshot?.items != items || snapshot?.goals != goals || snapshot?.catchUpIds != catchUpIds { revision += 1 }
+    func update(owner: String, items: [ChoreReminderItem], goals: [SavingsGoal] = [], catchUpIds: [UUID] = [], allowance: AllowanceReminderSchedule? = nil) {
+        if snapshot?.owner != owner || snapshot?.items != items || snapshot?.goals != goals || snapshot?.catchUpIds != catchUpIds || snapshot?.allowance != allowance { revision += 1 }
         if let snapshot, snapshot.owner != owner {
-            setArmedHomeKeys([])
+            alertedArrivalIDs = []
+            immediateRequests = [:]
             delays = [:]
             home = nil
             homeEnabled = false
             persistHome()
         }
-        snapshot = ReminderSnapshot(owner: owner, items: items, goals: goals, catchUpIds: catchUpIds)
+        snapshot = ReminderSnapshot(owner: owner, items: items, goals: goals, catchUpIds: catchUpIds, allowance: allowance)
         let ids = Set(items.map(\.id))
         delays = delays.filter { ids.contains($0.key) }
+        alertedArrivalIDs.formIntersection(ids)
+        save(Array(alertedArrivalIDs), "alertedArrivalIDs")
         save(snapshot, "snapshot")
         save(delays, "delays")
     }
 
     func clear() async {
         revision += 1
-        setArmedHomeKeys([])
+        alertedArrivalIDs = []
+        immediateRequests = [:]
+        save([String](), "alertedArrivalIDs")
         snapshot = nil
         delays = [:]
         home = nil
@@ -83,6 +109,9 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
         defaults.removeObject(forKey: Self.prefix + "snapshot")
         defaults.removeObject(forKey: Self.prefix + "delays")
         persistHome()
+        for region in location.monitoredRegions where region.identifier.hasPrefix("chaching.region.") {
+            location.stopMonitoring(for: region)
+        }
         try? await schedule()
         let delivered = await center.deliveredNotifications()
         center.removeDeliveredNotifications(withIdentifiers: delivered.filter {
@@ -107,90 +136,62 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
         let items = snapshot?.items.filter { $0.expiresAt > now } ?? []
         let ids = Set(items.map(\.id))
         delays = delays.filter { ids.contains($0.key) }
-        let canUseHome = homeEnabled && home != nil && hasLocationPermission
-        if !canUseHome {
-            // Losing permission must restore timed reminders rather than silently suppressing them.
-            delays = delays.filter { !$0.value.atHome }
+        if !hasArrivalPermission || !homeEnabled || home == nil {
+            // Restore a useful timed alert even when the original due-time reminders have passed.
+            for (key, delay) in delays where delay.atHome {
+                if let item = items.first(where: { $0.id == key }) {
+                    delays[key] = ChoreReminderDelay(until: min(now.addingTimeInterval(60), item.expiresAt.addingTimeInterval(-1)))
+                }
+            }
         }
         save(delays, "delays")
         let settings = await center.notificationSettings()
         let pending = await center.pendingNotificationRequests()
         let delivered = await center.deliveredNotifications()
         guard revision == self.revision else { return }
-        // A one-shot arrival alert may have been dismissed, so it is no longer delivered or pending.
-        if !armedHomeKeys.isEmpty && !pending.contains(where: { $0.identifier == Self.prefix + "home" }) {
-            for key in armedHomeKeys where delays[key]?.atHome == true { delays.removeValue(forKey: key) }
-            setArmedHomeKeys([])
-        }
-        save(delays, "delays")
-        if snapshot == nil {
-            center.removePendingNotificationRequests(withIdentifiers: pending.filter {
-                $0.identifier.hasPrefix("chaching.")
-            }.map(\.identifier))
-            scheduledCount = 0
-            nextReminderAt = nil
-            return
-        }
-        let managed = pending.filter {
-            $0.identifier.hasPrefix(Self.prefix) || $0.identifier.hasPrefix("chaching.chore.")
-        }
-        guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else {
+        let managed = pending.filter { $0.identifier.hasPrefix("chaching.") }
+        guard let snapshot,
+              settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else {
             center.removePendingNotificationRequests(withIdentifiers: managed.map(\.identifier))
+            stopArrivalRegions()
+            lastScheduledIDs = []
             scheduledCount = 0
             nextReminderAt = nil
             return
         }
-        let reserved = pending.count - managed.count
+
         let batches = ChoreReminderPlanner.batches(items: items, delays: delays, now: now,
-                                                   limit: max(0, min(56, 62 - reserved)))
+                                                   limit: ChoreReminderPlanner.notificationBudget)
         var requests: [UNNotificationRequest] = batches.map { batch in
             let components = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: batch.fireAt)
             return UNNotificationRequest(identifier: Self.prefix + "time.\(Int(batch.fireAt.timeIntervalSince1970))",
                                          content: content(for: batch.items, at: batch.fireAt, home: false),
                                          trigger: UNCalendarNotificationTrigger(dateMatching: components, repeats: false))
         }
-        let homeItems = items.filter { delays[$0.id]?.atHome == true }
-        if canUseHome, let home, !homeItems.isEmpty {
-            let region = CLCircularRegion(center: CLLocationCoordinate2D(latitude: home.latitude, longitude: home.longitude),
-                                          radius: 200, identifier: "chaching.home")
-            region.notifyOnEntry = true
-            region.notifyOnExit = false
-            requests.append(UNNotificationRequest(identifier: Self.prefix + "home",
-                                                   content: content(for: homeItems, at: now, home: true),
-                                                   trigger: UNLocationNotificationTrigger(region: region, repeats: false)))
-        }
-        // Region monitoring is intentionally limited to the nearest 20 destination chores.
-        // The timed reminder remains the fallback when location access is unavailable.
-        if hasLocationPermission {
-            let destinationItems = items
-                .filter { $0.location?.isValid == true && delays[$0.id]?.atHome != true }
-                .sorted { ($0.dueAt, $0.id) < ($1.dueAt, $1.id) }
-                .prefix(20)
-            for item in destinationItems {
-                guard let destination = item.location else { continue }
-                let region = CLCircularRegion(
-                    center: CLLocationCoordinate2D(latitude: destination.latitude, longitude: destination.longitude),
-                    radius: destination.radiusMeters,
-                    identifier: "chaching.destination.\(item.id)"
-                )
-                region.notifyOnEntry = true
-                region.notifyOnExit = false
-                requests.append(UNNotificationRequest(
-                    identifier: Self.prefix + "destination.\(item.id)",
-                    content: content(for: [item], at: now, home: false, destinationArrival: true),
-                    trigger: UNLocationNotificationTrigger(region: region, repeats: false)
-                ))
+        if let allowance = snapshot.allowance {
+            var components = Calendar.current.dateComponents(
+                allowance.repeatsWeekly ? [.weekday] : [.year, .month, .day], from: allowance.date)
+            components.hour = 9
+            components.minute = 0
+            components.second = 0
+            let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: allowance.repeatsWeekly)
+            if trigger.nextTriggerDate() != nil {
+                let content = UNMutableNotificationContent()
+                content.title = "Allowance day"
+                content.body = "\(allowance.childName)'s \(AppBrand.displayName) total is ready to review."
+                content.sound = .default
+                content.userInfo = ["owner": snapshot.owner, "kind": "allowance"]
+                requests.append(UNNotificationRequest(identifier: "chaching.allowance.\(allowance.familyId)",
+                    content: content, trigger: trigger))
             }
         }
+
         let catchUpIdentifier = Self.prefix + "catchup"
-        if let snapshot, let missed = snapshot.catchUpIds, !missed.isEmpty {
+        if let missed = snapshot.catchUpIds, !missed.isEmpty {
             let existing = managed.first { $0.identifier == catchUpIdentifier && $0.content.userInfo["owner"] as? String == snapshot.owner }
             let lastAlert: Date? = read("catchup.\(snapshot.owner)")
-            if let existing {
-                let content = existing.content.mutableCopy() as! UNMutableNotificationContent
-                content.body = "\(missed.count) missed \(missed.count == 1 ? "chore is" : "chores are") waiting. Take them one at a time, then send them for review."
-                requests.append(UNNotificationRequest(identifier: catchUpIdentifier, content: content, trigger: existing.trigger))
-            } else if let fireAt = ChoreReminderPlanner.catchUpReminderDate(now: now, lastScheduledAt: lastAlert) {
+            let existingDate = (existing?.trigger as? UNCalendarNotificationTrigger)?.nextTriggerDate()
+            if let fireAt = existingDate ?? ChoreReminderPlanner.catchUpReminderDate(now: now, lastScheduledAt: lastAlert) {
                 let content = UNMutableNotificationContent()
                 content.title = "A little catch-up time"
                 content.body = "\(missed.count) missed \(missed.count == 1 ? "chore is" : "chores are") waiting. Take them one at a time, then send them for review."
@@ -201,33 +202,151 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
                     trigger: UNCalendarNotificationTrigger(dateMatching: Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: fireAt), repeats: false)))
             }
         }
-        let desired = Set(requests.map(\.identifier))
+
+        let deliveredIDs = Set(delivered.map { $0.request.identifier })
+        immediateRequests = immediateRequests.filter { id, request in
+            request.content.userInfo["owner"] as? String == snapshot.owner
+                && !deliveredIDs.contains(id) && isCurrentImmediateRequest(request, now: now, itemIDs: ids)
+        }
+        var immediate = Dictionary(uniqueKeysWithValues: managed.filter {
+            ["task_nudge", "arrival_reminder"].contains($0.content.userInfo["kind"] as? String ?? "")
+                && $0.content.userInfo["owner"] as? String == snapshot.owner
+                && isCurrentImmediateRequest($0, now: now, itemIDs: ids)
+        }.map { ($0.identifier, $0) })
+        immediate.merge(immediateRequests) { _, new in new }
+        requests.append(contentsOf: immediate.values)
+
+        let candidates = requests.map { request in
+            let kind = request.content.userInfo["kind"] as? String
+            let priority: ReminderQueueCandidate.Priority =
+                kind == "allowance" ? .allowance : kind == "catch_up" ? .catchUp :
+                (kind == "task_nudge" || kind == "arrival_reminder") ? .immediate : .chore
+            return ReminderQueueCandidate(id: request.identifier,
+                fireAt: (request.trigger as? UNCalendarNotificationTrigger)?.nextTriggerDate() ?? now,
+                priority: priority)
+        }
+        let desired = ChoreReminderPlanner.selectedNotificationIDs(candidates, otherPendingCount: pending.count - managed.count)
+        requests = requests.filter { desired.contains($0.identifier) }
         center.removePendingNotificationRequests(withIdentifiers: managed.filter { !desired.contains($0.identifier) }.map(\.identifier))
+        lastScheduledIDs = Set(managed.map(\.identifier)).intersection(desired)
         for request in requests {
             guard revision == self.revision else { return }
-            // Do not re-arm a location trigger on every foreground poll.
             if let existing = managed.first(where: { $0.identifier == request.identifier }),
                existing.content.isEqual(request.content), existing.trigger?.isEqual(request.trigger) == true {
+                immediateRequests.removeValue(forKey: request.identifier)
                 continue
             }
             try await center.add(request)
-            if request.identifier == catchUpIdentifier, let fireAt = (request.trigger as? UNCalendarNotificationTrigger)?.nextTriggerDate(), let owner = snapshot?.owner {
-                save(fireAt, "catchup.\(owner)")
+            lastScheduledIDs.insert(request.identifier)
+            immediateRequests.removeValue(forKey: request.identifier)
+            if request.identifier == catchUpIdentifier, let fireAt = (request.trigger as? UNCalendarNotificationTrigger)?.nextTriggerDate() {
+                save(fireAt, "catchup.\(snapshot.owner)")
             }
         }
         guard revision == self.revision else { return }
-        setArmedHomeKeys(desired.contains(Self.prefix + "home") ? homeItems.map(\.id) : [])
+        synchronizeArrivalRegions(now: now)
         center.removeDeliveredNotifications(withIdentifiers: delivered.filter { notification in
-            guard notification.request.identifier.hasPrefix(Self.prefix) else { return false }
-            if notification.request.content.userInfo["owner"] as? String != snapshot?.owner { return true }
-            if notification.request.content.userInfo["kind"] as? String == "catch_up" {
-                return snapshot?.catchUpIds?.isEmpty != false
-            }
+            guard notification.request.identifier.hasPrefix("chaching.") else { return false }
+            if notification.request.content.userInfo["owner"] as? String != snapshot.owner { return true }
+            let kind = notification.request.content.userInfo["kind"] as? String
+            if kind == "catch_up" { return snapshot.catchUpIds?.isEmpty != false }
+            if kind == "allowance" || kind == "task_nudge" { return false }
             let keys = notification.request.content.userInfo["items"] as? [String] ?? []
             return !keys.contains(where: ids.contains)
         }.map { $0.request.identifier })
         scheduledCount = requests.count
-        nextReminderAt = batches.first?.fireAt
+        nextReminderAt = requests.compactMap { ($0.trigger as? UNCalendarNotificationTrigger)?.nextTriggerDate() }.min()
+    }
+
+    private func isCurrentImmediateRequest(_ request: UNNotificationRequest, now: Date, itemIDs: Set<String>) -> Bool {
+        if let expiry = request.content.userInfo["expires_at"] as? Double, expiry <= now.timeIntervalSince1970 { return false }
+        if request.content.userInfo["kind"] as? String == "arrival_reminder" {
+            return (request.content.userInfo["items"] as? [String] ?? []).contains(where: itemIDs.contains)
+        }
+        return true
+    }
+
+    func enqueueImmediate(_ request: UNNotificationRequest) async throws {
+        let owner = request.content.userInfo["owner"] as? String
+        guard owner == snapshot?.owner else { throw URLError(.cancelled) }
+        let delivered = await center.deliveredNotifications()
+        guard owner == snapshot?.owner else { throw URLError(.cancelled) }
+        if delivered.contains(where: { $0.request.identifier == request.identifier }) { return }
+        immediateRequests[request.identifier] = request
+        revision += 1
+        try await schedule()
+        guard owner == snapshot?.owner, lastScheduledIDs.contains(request.identifier) else {
+            throw URLError(.resourceUnavailable)
+        }
+    }
+
+    private func arrivalRegions(now: Date) -> [ChoreReminderRegion] {
+        guard hasArrivalPermission else { return [] }
+        let homeLocation = homeEnabled ? home.map {
+            ChoreLocation(name: "Home", latitude: $0.latitude, longitude: $0.longitude, leaveReminderMinutes: 0)
+        } : nil
+        let otherCount = location.monitoredRegions.filter { !$0.identifier.hasPrefix("chaching.region.") }.count
+        return ChoreReminderPlanner.regions(items: snapshot?.items ?? [], delays: delays, home: homeLocation,
+            alertedIDs: alertedArrivalIDs, now: now, otherRegionCount: otherCount)
+    }
+
+    private func stopArrivalRegions() {
+        for region in location.monitoredRegions where region.identifier.hasPrefix("chaching.region.") {
+            location.stopMonitoring(for: region)
+        }
+    }
+
+    private func synchronizeArrivalRegions(now: Date) {
+        let desired = arrivalRegions(now: now)
+        let ids = Set(desired.map(\.id))
+        for existing in location.monitoredRegions where existing.identifier.hasPrefix("chaching.region.") && !ids.contains(existing.identifier) {
+            location.stopMonitoring(for: existing)
+        }
+        for plan in desired {
+            let maximum = location.maximumRegionMonitoringDistance
+            let radius = maximum > 0 ? min(maximum, plan.location.radiusMeters) : plan.location.radiusMeters
+            if let existing = location.monitoredRegions.first(where: { $0.identifier == plan.id }) as? CLCircularRegion,
+               existing.center.latitude == plan.location.latitude, existing.center.longitude == plan.location.longitude,
+               existing.radius == radius { continue }
+            if let existing = location.monitoredRegions.first(where: { $0.identifier == plan.id }) {
+                location.stopMonitoring(for: existing)
+            }
+            let region = CLCircularRegion(center: CLLocationCoordinate2D(latitude: plan.location.latitude, longitude: plan.location.longitude),
+                                          radius: radius, identifier: plan.id)
+            region.notifyOnEntry = true
+            region.notifyOnExit = false
+            location.startMonitoring(for: region)
+        }
+    }
+
+    private func arrived(in regionID: String) async {
+        guard !arrivalsInFlight.contains(regionID), let owner = snapshot?.owner,
+              let region = arrivalRegions(now: Date()).first(where: { $0.id == regionID }) else { return }
+        let now = Date()
+        let items = ChoreReminderPlanner.arrivalItems(in: region, delays: delays, now: now)
+        guard !items.isEmpty else { return }
+        arrivalsInFlight.insert(regionID)
+        defer { arrivalsInFlight.remove(regionID) }
+        let isHome = items.contains { region.homeItemIDs.contains($0.id) }
+        let content = content(for: items, at: now, home: isHome, destinationArrival: !isHome)
+        content.userInfo["kind"] = "arrival_reminder"
+        content.userInfo["expires_at"] = items.map(\.expiresAt).max()!.timeIntervalSince1970
+        // A repeated region callback or interrupted scheduling attempt reuses the same request.
+        let identifier = Self.prefix + "arrival." + regionID + "." + items.map(\.id).sorted().joined(separator: ",")
+        let request = UNNotificationRequest(identifier: identifier, content: content,
+                                           trigger: UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false))
+        do {
+            try await enqueueImmediate(request)
+            guard snapshot?.owner == owner else { return }
+            for item in items {
+                alertedArrivalIDs.insert(item.id)
+                if region.homeItemIDs.contains(item.id) { delays.removeValue(forKey: item.id) }
+            }
+            save(Array(alertedArrivalIDs), "alertedArrivalIDs")
+            save(delays, "delays")
+            revision += 1
+            try await schedule()
+        } catch { message = "Couldn't schedule the arrival reminder. Timed reminders remain available." }
     }
 
     private func content(for items: [ChoreReminderItem], at date: Date, home: Bool, destinationArrival: Bool = false) -> UNMutableNotificationContent {
@@ -240,7 +359,9 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
             content.body = "You're at \(destination.name). \(item.title) is due at \(item.dueAt.formatted(date: .omitted, time: .shortened))."
         } else if items.count == 1, let item = items.first {
             content.title = item.dueAt > date ? "Chore due soon" : "Chore reminder"
-            if let destination = item.location, item.location?.leaveReminderMinutes ?? 0 > 0 {
+            if let destination = item.location, destination.leaveReminderMinutes > 0,
+               date < item.dueAt, date <= item.dueAt.addingTimeInterval(-Double(destination.leaveReminderMinutes) * 60 + 1) {
+                content.title = "Time to leave"
                 content.body = "Leave for \(destination.name) soon · Due \(item.dueAt.formatted(date: .omitted, time: .shortened))"
             } else {
                 content.body = "\(item.title) · Due \(item.dueAt.formatted(date: .omitted, time: .shortened))"
@@ -257,7 +378,7 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
         }
         content.sound = .default
         content.threadIdentifier = "chaching.chores"
-        content.categoryIdentifier = homeEnabled && hasLocationPermission && !home ? Self.homeCategory : Self.category
+        content.categoryIdentifier = homeEnabled && hasArrivalPermission && !home ? Self.homeCategory : Self.category
         content.userInfo = ["items": items.map(\.id), "owner": snapshot?.owner ?? "", "arrival": home, "destinationArrival": destinationArrival]
         return content
     }
@@ -283,8 +404,7 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
             for item in items {
                 delays[item.id] = ChoreReminderDelay(until: min(until, item.expiresAt.addingTimeInterval(-1)))
             }
-        } else if action == "AT_HOME", homeEnabled, hasLocationPermission {
-            setArmedHomeKeys([])
+        } else if action == "AT_HOME", homeEnabled, hasArrivalPermission {
             for item in items { delays[item.id] = ChoreReminderDelay(until: item.expiresAt, atHome: true) }
         } else if action == "OPEN_CHORES" || action == UNNotificationDefaultActionIdentifier {
             if arrival {
@@ -307,7 +427,15 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
     }
 
     var hasLocationPermission: Bool {
-        location.authorizationStatus == .authorizedWhenInUse || location.authorizationStatus == .authorizedAlways
+        locationAuthorization == .authorizedWhenInUse || locationAuthorization == .authorizedAlways
+    }
+
+    var hasArrivalPermission: Bool {
+        locationAuthorization == .authorizedAlways && CLLocationManager.isMonitoringAvailable(for: CLCircularRegion.self)
+    }
+
+    func enableBackgroundArrivalReminders() {
+        location.requestAlwaysAuthorization()
     }
 
     func setHomeEnabled(_ enabled: Bool) {
@@ -343,11 +471,6 @@ final class ChoreReminderCenter: NSObject, ObservableObject {
         defaults.set(homeEnabled, forKey: Self.prefix + "homeEnabled")
     }
 
-    private func setArmedHomeKeys(_ keys: [String]) {
-        armedHomeKeys = keys
-        save(keys, "armedHomeKeys")
-    }
-
     private func save<T: Encodable>(_ value: T, _ key: String) {
         if let data = try? JSONEncoder().encode(value) { defaults.set(data, forKey: Self.prefix + key) }
     }
@@ -376,6 +499,25 @@ struct ReminderChoreListView: View {
     var body: some View {
         NavigationStack {
             List {
+                if store.showingCatchUp {
+                    ForEach(ChoreOccurrenceGroup.grouped(chores)) { group in
+                        CatchUpChoreGroup(group: group)
+                    }
+                    if !store.awaitingReviewOccurrences.isEmpty {
+                        Section("Awaiting review") {
+                            ForEach(ChoreOccurrenceGroup.grouped(store.awaitingReviewOccurrences)) { group in
+                                DisclosureGroup {
+                                    ForEach(group.occurrences) { task in
+                                        Text(task.dueAt.formatted(date: .abbreviated, time: .shortened))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                } label: {
+                                    Text("\(store.chore(id: group.occurrences[0].choreDefinitionId)?.title ?? "Chore") · \(group.occurrences.count) pending")
+                                }
+                            }
+                        }
+                    }
+                } else {
                 ForEach(chores) { occurrence in
                     NavigationLink {
                         TaskDetailView(occurrenceId: occurrence.id)
@@ -386,9 +528,10 @@ struct ReminderChoreListView: View {
                         }
                     }
                 }
+                }
             }
             .overlay {
-                if chores.isEmpty {
+                if chores.isEmpty && (!store.showingCatchUp || store.awaitingReviewOccurrences.isEmpty) {
                     if store.familySyncState.isWorking { ProgressView() }
                     else { ContentUnavailableView("Nothing waiting here", systemImage: "checkmark.circle") }
                 }
@@ -396,6 +539,102 @@ struct ReminderChoreListView: View {
             .navigationTitle(store.showingCatchUp ? "Catch Up" : "Your Chores")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .task { await store.loadRemoteFamilyStateIfSignedIn(force: true) }
+        }
+    }
+}
+
+struct CatchUpChoreGroup: View {
+    @EnvironmentObject private var store: AppStore
+    let group: ChoreOccurrenceGroup
+    @State private var selected: Set<UUID> = []
+    @State private var showingClaim = false
+    @State private var expanded = false
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            Button(selected.count == min(100, group.occurrences.count) ? "Deselect all" : (group.occurrences.count > 100 ? "Select first 100" : "Select all")) {
+                selected = selected.count == min(100, group.occurrences.count) ? [] : Set(group.occurrences.prefix(100).map(\.id))
+            }
+            ForEach(group.occurrences) { task in
+                HStack {
+                    Button { if !selected.insert(task.id).inserted { selected.remove(task.id) } } label: {
+                        Image(systemName: selected.contains(task.id) ? "checkmark.square.fill" : "square")
+                            .font(.title2).frame(width: 44, height: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Select \(task.dueAt.formatted(date: .abbreviated, time: .shortened))")
+                    .accessibilityValue(selected.contains(task.id) ? "Selected" : "Not selected")
+                    NavigationLink { TaskDetailView(occurrenceId: task.id) } label: {
+                        Text(task.dueAt.formatted(date: .abbreviated, time: .omitted))
+                    }
+                }
+            }
+            if !selected.isEmpty {
+                Button { showingClaim = true } label: {
+                    Label("Report \(selected.count) as done", systemImage: "paperplane")
+                }
+                .disabled(selected.count > 100 || store.isMutationInFlight)
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(store.chore(id: group.occurrences[0].choreDefinitionId)?.title ?? "Chore").font(.headline)
+                Text("\(group.occurrences[0].dueAt.formatted(date: .omitted, time: .shortened)) · Missed \(group.occurrences.count) \(group.occurrences.count == 1 ? "time" : "times")")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            }
+        }
+        .sheet(isPresented: $showingClaim) {
+            NoPhotoClaimSheet(tasks: group.occurrences.filter { selected.contains($0.id) })
+        }
+        .onChange(of: group.occurrences.map(\.id)) { _, ids in selected.formIntersection(ids) }
+        .onAppear {
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["CHACHING_GROUPED_EXPANDED"] == "1" {
+                expanded = true
+                selected = Set(group.occurrences.prefix(2).map(\.id))
+                showingClaim = ProcessInfo.processInfo.environment["CHACHING_GROUPED_CLAIM"] == "1"
+            }
+            #endif
+        }
+    }
+}
+
+struct NoPhotoClaimSheet: View {
+    @EnvironmentObject private var store: AppStore
+    @Environment(\.dismiss) private var dismiss
+    let tasks: [TaskOccurrence]
+    @State private var note = ""
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    if let first = tasks.first, let chore = store.chore(id: first.choreDefinitionId) {
+                        Text(chore.title).font(.headline)
+                    }
+                    Text("I did \(tasks.count == 1 ? "this chore" : "these chores"), but don't have a photo.")
+                        .font(.headline)
+                    ForEach(tasks) { task in
+                        Text(task.dueAt.formatted(date: .abbreviated, time: .shortened))
+                    }
+                } header: { Text("\(tasks.count) \(tasks.count == 1 ? "chore" : "chores") selected") }
+                Section {
+                    TextField("Optional note to your parent", text: $note, axis: .vertical)
+                        .lineLimit(3...6)
+                } footer: {
+                    Text(note.count > 1000 ? "Please keep your note under 1000 characters." : "Your parent will review your claim before any deduction is restored.")
+                }
+                Button {
+                    Task { if await store.reportChoresDone(ids: tasks.map(\.id), note: note) { dismiss() } }
+                } label: { Label("Submit selected as done", systemImage: "paperplane.fill") }
+                    .disabled(tasks.isEmpty || tasks.count > 100 || note.count > 1000 || store.isMutationInFlight)
+                if store.isMutationInFlight { ProgressView("Submitting...") }
+            }
+            .navigationTitle("Report Done")
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(store.isMutationInFlight) } }
+            .interactiveDismissDisabled(store.isMutationInFlight)
+            .alert(item: $store.mutationFailure) { failure in
+                Alert(title: Text(failure.title), message: Text(failure.message), dismissButton: .default(Text("OK")))
+            }
         }
     }
 }
@@ -419,13 +658,28 @@ extension ChoreReminderCenter: UNUserNotificationCenterDelegate {
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
-        [.banner, .list, .sound]
+        let info = notification.request.content.userInfo
+        return await presentationOptions(identifier: notification.request.identifier,
+            owner: info["owner"] as? String, kind: info["kind"] as? String, keys: info["items"] as? [String])
+    }
+
+    private func presentationOptions(identifier: String, owner: String?, kind: String?, keys: [String]?) -> UNNotificationPresentationOptions {
+        guard identifier.hasPrefix("chaching.") else { return [.banner, .list, .sound] }
+        guard let snapshot, owner == snapshot.owner else { return [] }
+        if kind == "catch_up", snapshot.catchUpIds?.isEmpty != false { return [] }
+        if let keys {
+            let active = Set(snapshot.items.filter { $0.expiresAt > Date() }.map(\.id))
+            guard keys.contains(where: active.contains) else { return [] }
+        }
+        return [.banner, .list, .sound]
     }
 }
 
 extension ChoreReminderCenter: CLLocationManagerDelegate {
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         Task { @MainActor in
+            locationAuthorization = location.authorizationStatus
+            revision += 1
             if wantsCurrentLocation {
                 if hasLocationPermission { location.requestLocation() }
                 else if location.authorizationStatus != .notDetermined {
@@ -434,7 +688,17 @@ extension ChoreReminderCenter: CLLocationManagerDelegate {
                     message = "Location access is off. Timed reminders are still available."
                 }
             }
+            do { try await schedule() } catch { message = "Couldn't update reminders after the permission change." }
         }
+    }
+
+    nonisolated func locationManager(_ manager: CLLocationManager, didEnterRegion region: CLRegion) {
+        let identifier = region.identifier
+        Task { @MainActor in await arrived(in: identifier) }
+    }
+
+    nonisolated func locationManager(_ manager: CLLocationManager, monitoringDidFailFor region: CLRegion?, withError error: Error) {
+        Task { @MainActor in message = "Arrival reminders are unavailable. Timed reminders are still scheduled." }
     }
 
     nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
@@ -554,7 +818,15 @@ struct ReminderSettingsView: View {
                     }
                 }
                 Section {
-                    Toggle("Arrival Reminders", isOn: Binding(get: { reminders.homeEnabled }, set: { reminders.setHomeEnabled($0) }))
+                    if !reminders.hasArrivalPermission {
+                        Button("Enable Background Arrival Reminders") { reminders.enableBackgroundArrivalReminders() }
+                        Button("iPhone Location Settings") {
+                            if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                        }
+                        Text("Choose Always location access for home and chore-destination reminders while the app is closed. Timed reminders work without it.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                    Toggle("When I Get Home", isOn: Binding(get: { reminders.homeEnabled }, set: { reminders.setHomeEnabled($0) }))
                         .disabled(reminders.home == nil)
                     Button { confirmHome = true } label: {
                         Label(reminders.isLocating ? "Finding Location" : "Use Current Location as Home", systemImage: "house")
@@ -564,8 +836,8 @@ struct ReminderSettingsView: View {
                         Button("Remove Home Location", role: .destructive) { reminders.removeHome() }
                     }
                     if let message = reminders.message { Text(message).font(.subheadline).foregroundStyle(.secondary) }
-                } header: { Text("When I Get Home") } footer: {
-                    Text("Your home location stays on this iPhone. Arrival reminders are optional and may be delayed by iOS. Snoozing or waiting until home doesn't change a chore's deadline.")
+                } header: { Text("Location Reminders") } footer: {
+                    Text("Your home location stays on this iPhone. Arrival reminders check whether a chore is still due using the latest data on this device. They are optional and may be delayed by iOS. No continuous location tracking is used. Snoozing doesn't change a chore's deadline.")
                 }
             }
             .navigationTitle("Reminders")

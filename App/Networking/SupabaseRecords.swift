@@ -68,7 +68,7 @@ struct AllowanceSettlementRecord: Codable, Identifiable, Sendable {
     let weekId: UUID
     let amountCents: Int
     let confirmedAt: Date
-    let confirmedBy: UUID
+    let confirmedBy: UUID?
     let paidAt: Date?
     let paidBy: UUID?
     var id: UUID { weekId }
@@ -337,6 +337,7 @@ struct TaskNudgeRecord: Codable, Identifiable, Sendable {
 }
 
 struct ChoreSubmissionRecord: Codable, Identifiable, Sendable {
+    let reportedDoneNote: String?
     let id: UUID
     let taskOccurrenceId: UUID
     let childId: UUID
@@ -348,6 +349,7 @@ struct ChoreSubmissionRecord: Codable, Identifiable, Sendable {
     let createdAt: Date
 
     enum CodingKeys: String, CodingKey {
+        case reportedDoneNote = "reported_done_note"
         case id
         case taskOccurrenceId = "task_occurrence_id"
         case childId = "child_id"

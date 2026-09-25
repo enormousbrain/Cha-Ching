@@ -23,6 +23,26 @@ struct SupabaseRemoteStore: Sendable {
         try await client.auth.signOut()
     }
 
+    func photoSharingStatus(familyId: UUID) async throws -> PhotoSharingStatus {
+        try await client.rpc("photo_sharing_status", params: ["target_family_id": familyId.uuidString]).execute().value
+    }
+
+    func setPhotoSharingConsent(familyId: UUID, accepted: Bool) async throws {
+        struct Parameters: Encodable { let target_family_id: UUID; let accepted: Bool }
+        try await client.rpc("set_photo_sharing_consent", params: Parameters(target_family_id: familyId, accepted: accepted)).execute()
+    }
+
+    func deleteAccount(appleAuthorizationCode: String?) async throws -> Bool {
+        _ = try await currentSession()
+        struct Response: Decodable { let accepted: Bool; let appleRevoked: Bool }
+        var body = ["confirmation": "DELETE"]
+        body["appleAuthorizationCode"] = appleAuthorizationCode
+        let response: Response = try await client.functions.invoke("delete-account", options: FunctionInvokeOptions(body: body))
+        guard response.accepted else { throw URLError(.badServerResponse) }
+        try? await client.auth.signOut(scope: .local)
+        return response.appleRevoked
+    }
+
     func fetchMembershipsForCurrentUser(userId: UUID) async throws -> [FamilyMemberRecord] {
         try await client
             .from("family_members")
@@ -685,7 +705,7 @@ struct SupabaseRemoteStore: Sendable {
                 options: FileOptions(
                     cacheControl: "3600",
                     contentType: "image/jpeg",
-                    upsert: true
+                    upsert: false
                 )
             )
 
@@ -736,6 +756,40 @@ struct SupabaseRemoteStore: Sendable {
         }
 
         return response
+    }
+
+    func reportChoresDone(ids: [UUID], note: String) async throws {
+        struct Params: Encodable { let target_occurrence_ids: [UUID]; let target_note: String }
+        _ = try await client.rpc("report_chores_done", params: Params(target_occurrence_ids: ids, target_note: note)).execute()
+    }
+
+    func reviewChoreBatch(ids: [UUID], decision: ParentDecision.Decision) async throws {
+        struct Params: Encodable { let target_occurrence_ids: [UUID]; let target_decision: String }
+        _ = try await client.rpc("review_chore_batch", params: Params(target_occurrence_ids: ids, target_decision: decision.rawValue)).execute()
+    }
+
+    func fetchPendingOccurrences(childIds: [UUID]) async throws -> [TaskOccurrenceRecord] {
+        guard !childIds.isEmpty else { return [] }
+        var result: [TaskOccurrenceRecord] = []
+        while true {
+            let page: [TaskOccurrenceRecord] = try await client.from("task_occurrences").select()
+                .in("child_id", values: childIds.map(\.uuidString))
+                .in("status", values: ["submitted", "ai_reviewed"])
+                .order("due_at").order("id").range(from: result.count, to: result.count + 499).execute().value
+            result.append(contentsOf: page)
+            if page.count < 500 { return result }
+        }
+    }
+
+    func fetchSubmissions(ids: [UUID]) async throws -> [ChoreSubmissionRecord] {
+        guard !ids.isEmpty else { return [] }
+        var result: [ChoreSubmissionRecord] = []
+        for start in stride(from: 0, to: ids.count, by: 100) {
+            let page: [ChoreSubmissionRecord] = try await client.from("chore_submissions").select()
+                .in("id", values: ids[start..<min(start + 100, ids.count)].map(\.uuidString)).execute().value
+            result.append(contentsOf: page)
+        }
+        return result
     }
 
     func reviewEvidence(submissionId: UUID) async throws -> ReviewEvidenceResponse {

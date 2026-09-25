@@ -49,6 +49,7 @@ final class AppStore: ObservableObject {
     private var remoteRefreshGeneration = UUID()
     private var reminderStateReady = false
     private var hasLoadedRemoteAllowance = false
+    private var isDeletingAccount = false
     private var pushObserver: NSObjectProtocol?
 
     @Published private(set) var familyId: UUID
@@ -202,9 +203,69 @@ final class AppStore: ObservableObject {
             .sorted { ($0.dueAt, $0.id.uuidString) < ($1.dueAt, $1.id.uuidString) }
     }
 
+    var awaitingReviewOccurrences: [TaskOccurrence] {
+        occurrences.filter { $0.childId == childId && [.submitted, .aiReviewed].contains($0.status) && allowanceSettlements[$0.weekId] == nil }
+    }
+
     func canSubmit(_ occurrence: TaskOccurrence) -> Bool {
         occurrence.childId == childId && allowanceSettlements[occurrence.weekId] == nil
             && (occurrence.status.isOpen || occurrence.status == .missed)
+    }
+
+    func reportChoresDone(ids: [UUID], note: String) async -> Bool {
+        guard isChildSession, canAttemptRemoteRefresh else { return failMutation(actionTitle: "Submit chores", message: "Sign in as the assigned child to submit chores.") }
+        let saved = await commitMutation(actionTitle: "Submit chores", successMessage: "Sent for parent review.", remoteSave: {
+            try await remoteStore.reportChoresDone(ids: ids, note: note)
+        }, localCommit: {
+            for id in ids { updateOccurrence(id) { $0.status = .submitted; $0.updatedAt = Date() } }
+            publishWidgetSnapshot()
+        })
+        if saved { await refreshRemoteFamilyState() }
+        return saved
+    }
+
+    func reviewChoreBatch(ids: [UUID], decision: ParentDecision.Decision) async -> Bool {
+        guard isParentSession, canAttemptRemoteRefresh else { return false }
+        let saved = await commitMutation(actionTitle: "Review selected chores", successMessage: "Decisions saved.", remoteSave: {
+            try await remoteStore.reviewChoreBatch(ids: ids, decision: decision)
+        }, localCommit: {})
+        await refreshRemoteFamilyState()
+        return saved
+    }
+
+    struct FamilyReviewItem: Identifiable {
+        var id: UUID { occurrence.id }
+        let occurrence: TaskOccurrence
+        let chore: ChoreDefinition
+        let childName: String
+        let submission: ChoreSubmission?
+    }
+
+    func loadFamilyPendingReviews() async throws -> [FamilyReviewItem] {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["CHACHING_GROUPED_PREVIEW"] == "parent" {
+            return awaitingReviewOccurrences.compactMap { task in
+                guard let chore = chore(id: task.choreDefinitionId) else { return nil }
+                return FamilyReviewItem(occurrence: task, chore: chore, childName: childName, submission: submission(for: task))
+            }
+        }
+        #endif
+        guard isParentSession, canAttemptRemoteRefresh else { return [] }
+        let requestedFamily = familyId
+        let requestedUser = session.userId
+        let profiles = try await remoteStore.fetchChildProfiles(familyId: requestedFamily)
+        let tasks = try await remoteStore.fetchPendingOccurrences(childIds: profiles.map(\.id))
+        let definitions = try await remoteStore.fetchChores(familyId: requestedFamily)
+        let photos = try await remoteStore.fetchSubmissions(ids: tasks.compactMap(\.submissionId))
+        let settled = Set(try await remoteStore.fetchAllowanceSettlements(weekIds: Array(Set(tasks.map(\.weekId)))).map(\.weekId))
+        guard familyId == requestedFamily, session.userId == requestedUser, isParentSession else { throw CancellationError() }
+        return tasks.filter { !settled.contains($0.weekId) }.compactMap { task in
+            guard let chore = definitions.first(where: { $0.id == task.choreDefinitionId }),
+                  let child = profiles.first(where: { $0.id == task.childId }) else { return nil }
+            return FamilyReviewItem(occurrence: localOccurrence(from: task), chore: localChoreDefinition(from: chore),
+                childName: child.displayName,
+                submission: photos.first(where: { $0.id == task.submissionId }).map { localSubmission(from: $0) })
+        }
     }
 
     var pendingReviewOccurrences: [TaskOccurrence] {
@@ -243,6 +304,7 @@ final class AppStore: ObservableObject {
     }
 
     func loadRemoteFamilyStateIfSignedIn(force: Bool = false) async {
+        guard !isDeletingAccount else { return }
         guard SupabaseClientProvider.shared.auth.currentSession != nil else {
             clearWidgetSnapshot()
             familySyncState = .localPreview
@@ -319,6 +381,7 @@ final class AppStore: ObservableObject {
     }
 
     func loadRemoteFamilyState(selectingChildId: UUID? = nil) async {
+        guard !isDeletingAccount else { return }
         // Keep foreground, background, and child-switch refreshes in request order.
         let previous = remoteRefreshTask
         let generation = remoteRefreshGeneration
@@ -488,6 +551,41 @@ final class AppStore: ObservableObject {
         } catch {
             familySyncState = .failed(error.localizedDescription)
         }
+    }
+
+    var isSignedIn: Bool { SupabaseClientProvider.shared.auth.currentSession != nil }
+    var usesAppleSignIn: Bool {
+        SupabaseClientProvider.shared.auth.currentSession?.user.identities?.contains { $0.provider == "apple" } == true
+    }
+
+    func photoSharingStatus() async throws -> PhotoSharingStatus {
+        try await remoteStore.photoSharingStatus(familyId: familyId)
+    }
+
+    func setPhotoSharingConsent(accepted: Bool) async throws {
+        try await remoteStore.setPhotoSharingConsent(familyId: familyId, accepted: accepted)
+    }
+
+    func deleteAccount(appleAuthorizationCode: String? = nil) async throws -> Bool {
+        guard !isDeletingAccount, activeMutationTitle == nil else { throw URLError(.cannotLoadFromNetwork) }
+        isDeletingAccount = true
+        defer { isDeletingAccount = false }
+        remoteRefreshGeneration = UUID()
+        remoteRefreshTask?.cancel()
+        let appleRevoked = try await remoteStore.deleteAccount(appleAuthorizationCode: appleAuthorizationCode)
+        hasLoadedRemoteAllowance = false
+        reminderStateReady = false
+        await ChoreReminderCenter.shared.clear()
+        ChoreReminderCenter.shared.removeHome()
+        UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
+        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+        for key in settingsStore.dictionaryRepresentation().keys where key.hasPrefix("chaching.") {
+            settingsStore.removeObject(forKey: key)
+        }
+        clearWidgetSnapshot()
+        applyLocalPreviewState()
+        familySyncState = .localPreview
+        return appleRevoked
     }
 
     func handleIncomingURL(_ url: URL) {
@@ -852,6 +950,10 @@ final class AppStore: ObservableObject {
         }
 
         _ = try await remoteStore.currentSession()
+        let consent = try await remoteStore.photoSharingStatus(familyId: familyId)
+        guard consent.canUpload else {
+            return .failed("Photo sharing needs your permission and a parent's authorization. Open Privacy & Account to review it.")
+        }
         let submissionId = UUID()
         let imagePath = try await remoteStore.uploadEvidenceJPEG(
             familyId: familyId,
@@ -1227,6 +1329,8 @@ final class AppStore: ObservableObject {
         let settings = await center.notificationSettings()
 
         guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else {
+            try? await ChoreReminderCenter.shared.schedule()
+            notificationState = .denied
             return
         }
 
@@ -1239,52 +1343,18 @@ final class AppStore: ObservableObject {
     }
 
     private func scheduleLocalNotifications() async throws {
-        let center = UNUserNotificationCenter.current()
-        guard reminderStateReady else {
-            throw FamilySyncError.missingChildProfile
-        }
+        guard reminderStateReady else { throw FamilySyncError.missingChildProfile }
         updateChoreReminders()
-        let owner = session.userId
-        let pending = await center.pendingNotificationRequests()
-        guard reminderStateReady, session.userId == owner else { return }
-        center.removePendingNotificationRequests(withIdentifiers: pending.filter {
-            $0.identifier.hasPrefix("chaching.allowance.")
-        }.map(\.identifier))
-
-        let allowanceDate = nextAllowanceDate
-        var allowanceComponents: DateComponents
-        if allowanceSettings.cadence == .weekly {
-            allowanceComponents = Calendar.current.dateComponents([.weekday], from: allowanceDate)
-        } else {
-            allowanceComponents = Calendar.current.dateComponents([.year, .month, .day], from: allowanceDate)
-        }
-        allowanceComponents.hour = 9
-        allowanceComponents.minute = 0
-        allowanceComponents.second = 0
-
-        let allowanceContent = UNMutableNotificationContent()
-        allowanceContent.title = "Allowance day"
-        allowanceContent.body = "\(childName)'s \(AppBrand.displayName) total is ready to review."
-        allowanceContent.sound = .default
-
-        let allowanceTrigger = UNCalendarNotificationTrigger(
-            dateMatching: allowanceComponents,
-            repeats: allowanceSettings.cadence == .weekly
-        )
-        let allowanceRequest = UNNotificationRequest(
-            identifier: allowanceNotificationIdentifier,
-            content: allowanceContent,
-            trigger: allowanceTrigger
-        )
-        try await center.add(allowanceRequest)
         try await ChoreReminderCenter.shared.schedule()
     }
 
     private func updateChoreReminders() {
         let items = ChoreReminderPlanner.items(chores: chores, occurrences: occurrences, childId: childId, now: Date())
         ChoreReminderCenter.shared.update(owner: "\(session.userId).\(familyId).\(childId)", items: items,
-                                         goals: isChildSession ? savingsGoals : [],
-                                         catchUpIds: isChildSession ? catchUpOccurrences.map(\.id) : [])
+            goals: isChildSession ? savingsGoals : [],
+            catchUpIds: isChildSession ? catchUpOccurrences.map(\.id) : [],
+            allowance: AllowanceReminderSchedule(familyId: familyId, childName: childName,
+                date: nextAllowanceDate, repeatsWeekly: allowanceSettings.cadence == .weekly))
     }
 
     private func processPendingTaskNudges(familyId: UUID, childId: UUID) async {
@@ -1300,10 +1370,15 @@ final class AppStore: ObservableObject {
 
         do {
             let nudges = try await remoteStore.fetchPendingTaskNudges(familyId: familyId, childId: childId)
+            guard self.familyId == familyId, self.childId == childId, isChildSession else { return }
             var deliveredIds = deliveredNudgeIds()
 
             for nudge in nudges where !deliveredIds.contains(nudge.id.uuidString) {
-                try await scheduleNudgeNotification(nudge)
+                guard self.familyId == familyId, self.childId == childId, isChildSession else { return }
+                if let occurrence = occurrences.first(where: { $0.id == nudge.taskOccurrenceId }), canSubmit(occurrence) {
+                    try await scheduleNudgeNotification(nudge)
+                }
+                guard self.familyId == familyId, self.childId == childId, isChildSession else { return }
                 deliveredIds.insert(nudge.id.uuidString)
                 saveDeliveredNudgeIds(deliveredIds)
                 _ = try? await remoteStore.markTaskNudgeDelivered(id: nudge.id)
@@ -1336,11 +1411,7 @@ final class AppStore: ObservableObject {
             trigger: UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
         )
 
-        try await UNUserNotificationCenter.current().add(request)
-    }
-
-    private var allowanceNotificationIdentifier: String {
-        "chaching.allowance.\(familyId.uuidString)"
+        try await ChoreReminderCenter.shared.enqueueImmediate(request)
     }
 
     private func nudgeNotificationIdentifier(nudgeId: UUID) -> String {
@@ -1856,7 +1927,8 @@ final class AppStore: ObservableObject {
             imageName: record.imagePath ?? "no-photo",
             submittedAt: record.submittedAt,
             aiResult: record.aiResult.map { localAIReviewResult(from: $0) },
-            parentDecision: record.parentDecision.flatMap { localParentDecision(from: $0) }
+            parentDecision: record.parentDecision.flatMap { localParentDecision(from: $0) },
+            reportedDoneNote: record.reportedDoneNote
         )
     }
 
@@ -2388,7 +2460,7 @@ final class AppStore: ObservableObject {
         remoteSave: () async throws -> Void,
         localCommit: () -> Void
     ) async -> Bool {
-        guard activeMutationTitle == nil else {
+        guard activeMutationTitle == nil, !isDeletingAccount else {
             return false
         }
 

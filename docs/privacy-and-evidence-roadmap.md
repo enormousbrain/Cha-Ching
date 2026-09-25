@@ -121,9 +121,12 @@ Done:
 - Production-safe AI failure behavior: submitted photos remain pending for a parent and never fall back to convincing mock results.
 - Authenticated parent evidence thumbnails and full-screen private photo viewing.
 - Verdict-aware AI presentation that does not equate confidence with task completion or parent approval.
+- Parent authorization and uploader consent enforced by Storage policies and registration triggers; withdrawal blocks new uploads.
+- In-app privacy/account settings, account deletion, and durable Storage/Auth cleanup retries. See [implementation notes](privacy-account-settings.md).
+- Scheduled cleanup for abandoned uploads older than 24 hours, excluding registered evidence and pending reviews.
 
 Next:
 
 1. Physical-device smoke test for on-device person/face blocking before upload.
 2. Realtime or push-triggered refresh for faster cross-device updates.
-3. Scheduled cleanup for orphaned Storage uploads that never reached transactional registration.
+3. Publish the privacy/support pages, configure the Apple sign-in revocation key, and verify consent/deletion on disposable physical-device accounts.

@@ -6,6 +6,7 @@ import {
   deleteSubmissionEvidence,
   EvidenceDeletionError,
 } from "../_shared/evidence-deletion.ts";
+import { drainPrivacyCleanup } from "../_shared/privacy-cleanup.ts";
 
 const defaultBatchSize = 25;
 const maxBatchSize = 100;
@@ -40,6 +41,9 @@ async function handleRequest(request: Request): Promise<Response> {
     { auth: { persistSession: false } },
   );
   const batchSize = parseBatchSize(Deno.env.get("EVIDENCE_CLEANUP_BATCH_SIZE"));
+  const { error: orphanError } = await serviceClient.rpc("queue_orphaned_evidence", { batch_size: batchSize });
+  if (orphanError) throw new Error("orphan_evidence_lookup_failed");
+  const privacyCleanup = await drainPrivacyCleanup(serviceClient, batchSize);
   const { data: dueSubmissions, error: dueError } = await serviceClient
     .from("chore_submissions")
     .select("id")
@@ -80,6 +84,7 @@ async function handleRequest(request: Request): Promise<Response> {
   );
 
   const response = {
+    privacy_cleanup: privacyCleanup,
     attempted_evidence_count: dueSubmissions?.length ?? 0,
     deleted_evidence_count: deletedSubmissionIds.length,
     deleted_submission_ids: deletedSubmissionIds,
@@ -89,7 +94,7 @@ async function handleRequest(request: Request): Promise<Response> {
     more_evidence_may_be_due: (dueSubmissions?.length ?? 0) === batchSize,
   };
 
-  return json(response, failedSubmissions.length > 0 ? 500 : 200);
+  return json(response, failedSubmissions.length > 0 || privacyCleanup.failedEvidence > 0 ? 500 : 200);
 }
 
 async function expireInvites(

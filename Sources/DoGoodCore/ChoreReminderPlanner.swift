@@ -25,7 +25,75 @@ public struct ChoreReminderBatch: Equatable, Sendable {
     public var items: [ChoreReminderItem]
 }
 
+public struct ReminderQueueCandidate: Equatable, Sendable {
+    public enum Priority: Int, Sendable { case immediate, allowance, catchUp, chore }
+    public var id: String
+    public var fireAt: Date
+    public var priority: Priority
+
+    public init(id: String, fireAt: Date, priority: Priority) {
+        self.id = id; self.fireAt = fireAt; self.priority = priority
+    }
+}
+
+public struct ChoreReminderRegion: Equatable, Sendable, Identifiable {
+    public var id: String
+    public var location: ChoreLocation
+    public var items: [ChoreReminderItem]
+    public var homeItemIDs: Set<String>
+}
+
 public enum ChoreReminderPlanner {
+    // Leave headroom below iOS's historical pending-request limit.
+    public static let notificationBudget = 60
+    public static let regionBudget = 20
+
+    public static func selectedNotificationIDs(_ candidates: [ReminderQueueCandidate], otherPendingCount: Int) -> Set<String> {
+        let remaining = max(0, notificationBudget - max(0, otherPendingCount))
+        let unique = Dictionary(grouping: candidates, by: \.id).compactMap { _, values in
+            values.min { ($0.priority.rawValue, $0.fireAt) < ($1.priority.rawValue, $1.fireAt) }
+        }
+        return Set(unique.sorted {
+            ($0.priority.rawValue, $0.fireAt, $0.id) < ($1.priority.rawValue, $1.fireAt, $1.id)
+        }.prefix(remaining).map(\.id))
+    }
+
+    public static func regions(items: [ChoreReminderItem], delays: [String: ChoreReminderDelay], home: ChoreLocation?,
+                               alertedIDs: Set<String>, now: Date, otherRegionCount: Int = 0) -> [ChoreReminderRegion] {
+        var grouped: [String: ChoreReminderRegion] = [:]
+        func add(_ item: ChoreReminderItem, location: ChoreLocation, isHome: Bool) {
+            // Nearby coordinate fixes for the same destination share one region (about 11 m precision).
+            let id = "chaching.region.\(Int((location.latitude * 10000).rounded())).\(Int((location.longitude * 10000).rounded()))"
+            var region = grouped[id] ?? ChoreReminderRegion(id: id, location: location, items: [], homeItemIDs: [])
+            region.location.radiusMeters = max(region.location.radiusMeters, location.radiusMeters)
+            region.items.append(item)
+            if isHome { region.homeItemIDs.insert(item.id) }
+            grouped[id] = region
+        }
+        for item in items where item.expiresAt > now {
+            if delays[item.id]?.atHome == true {
+                if let home, home.isValid { add(item, location: home, isHome: true) }
+            } else if !alertedIDs.contains(item.id), let location = item.location, location.isValid {
+                add(item, location: location, isHome: false)
+            }
+        }
+        return grouped.values.sorted {
+            let lhs = ($0.homeItemIDs.isEmpty ? 1 : 0, $0.items.map(\.dueAt).min() ?? .distantFuture, $0.id)
+            let rhs = ($1.homeItemIDs.isEmpty ? 1 : 0, $1.items.map(\.dueAt).min() ?? .distantFuture, $1.id)
+            return lhs < rhs
+        }.prefix(max(0, regionBudget - max(0, otherRegionCount))).map { $0 }
+    }
+
+    public static func arrivalItems(in region: ChoreReminderRegion, delays: [String: ChoreReminderDelay], now: Date) -> [ChoreReminderItem] {
+        region.items.filter { item in
+            guard item.expiresAt > now else { return false }
+            if region.homeItemIDs.contains(item.id) { return delays[item.id]?.atHome == true }
+            if let delay = delays[item.id], delay.atHome || delay.until > now { return false }
+            let leadMinutes = max(15, item.location?.leaveReminderMinutes ?? 0)
+            return now >= item.dueAt.addingTimeInterval(-Double(leadMinutes) * 60)
+        }.sorted { ($0.dueAt, $0.id) < ($1.dueAt, $1.id) }
+    }
+
     public static func catchUpReminderDate(now: Date, lastScheduledAt: Date?, calendar: Calendar = .current) -> Date? {
         if let lastScheduledAt, lastScheduledAt >= calendar.startOfDay(for: now) { return nil }
         let today = calendar.startOfDay(for: now)

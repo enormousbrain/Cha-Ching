@@ -32,6 +32,8 @@
 	<string>Use the camera to submit chore evidence photos for parent review.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Save your home on this iPhone so you can choose to receive chore reminders when you arrive home.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Receive optional arrival reminders for home and chore destinations while ChaChing is closed. Your iPhone checks whether the chore is still due when you arrive; ChaChing does not track your location continuously.</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UIBackgroundModes</key>

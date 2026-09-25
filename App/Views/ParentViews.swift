@@ -112,6 +112,7 @@ struct ParentReviewQueueView: View {
     @State private var showingBonus = false
     @State private var showingPreviewReview = false
     @State private var showingPreviewInsights = false
+    @State private var showingAllowanceOverview = false
 
     private var visibleOccurrences: [TaskOccurrence] {
         switch filter {
@@ -128,6 +129,7 @@ struct ParentReviewQueueView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                DisclosureGroup(isExpanded: $showingAllowanceOverview) {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(store.childName)
@@ -152,6 +154,10 @@ struct ParentReviewQueueView: View {
                     Label("Chore Insights", systemImage: "chart.bar.xaxis")
                         .font(.subheadline.weight(.semibold))
                 }
+                } label: {
+                    Text("\(store.childName.isEmpty ? "Family" : store.childName)'s allowance")
+                        .font(.headline)
+                }
 
                 Divider()
 
@@ -162,7 +168,9 @@ struct ParentReviewQueueView: View {
                 }
                 .pickerStyle(.segmented)
 
-                if visibleOccurrences.isEmpty {
+                if filter == .pending {
+                    FamilyPendingApprovalsView()
+                } else if visibleOccurrences.isEmpty {
                     ContentUnavailableView(
                         filter == .pending ? "All caught up" : (filter == .today ? "Nothing left today" : "No completed chores yet"),
                         systemImage: filter == .pending ? "checkmark.circle" : "calendar",
@@ -213,6 +221,150 @@ struct ParentReviewQueueView: View {
             showingPreviewReview = ProcessInfo.processInfo.environment["CHACHING_REVIEW_DETAIL"] == "1"
             showingPreviewInsights = ProcessInfo.processInfo.environment["CHACHING_INSIGHTS"] == "1"
             #endif
+        }
+    }
+}
+
+struct FamilyPendingApprovalsView: View {
+    @EnvironmentObject private var store: AppStore
+    @State private var items: [AppStore.FamilyReviewItem] = []
+    @State private var error: String?
+    @State private var loading = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("Pending Approvals").font(.headline)
+                Spacer()
+                Text("\(items.count)").monospacedDigit()
+            }
+            if loading { ProgressView() }
+            if let error {
+                Text(error).foregroundStyle(.red)
+                Button("Retry") { Task { await reload() } }
+            }
+            if items.isEmpty && !loading && error == nil {
+                ContentUnavailableView("All caught up", systemImage: "checkmark.circle")
+            }
+            ForEach(store.childProfiles) { child in
+                let childItems = items.filter { $0.occurrence.childId == child.id }
+                if !childItems.isEmpty {
+                    Text(child.displayName).font(.title3.weight(.bold))
+                    ForEach(ChoreOccurrenceGroup.grouped(childItems.map(\.occurrence))) { group in
+                        PendingApprovalGroup(items: group.occurrences.compactMap { task in childItems.first { $0.id == task.id } }, onSaved: { await reload() })
+                        Divider()
+                    }
+                }
+            }
+        }
+        .task(id: store.familySyncState) {
+            guard !store.familySyncState.isWorking else { return }
+            await reload()
+        }
+        .onChange(of: store.familyId) { _, _ in items = [] }
+    }
+
+    private func reload() async {
+        loading = true
+        defer { loading = false }
+        do {
+            let result = try await store.loadFamilyPendingReviews()
+            guard !Task.isCancelled else { return }
+            items = result
+            error = nil
+        } catch {
+            if !Task.isCancelled { self.error = "Couldn't refresh approvals. Try again." }
+        }
+    }
+}
+
+struct PendingApprovalGroup: View {
+    @EnvironmentObject private var store: AppStore
+    let items: [AppStore.FamilyReviewItem]
+    let onSaved: () async -> Void
+    @State private var selected: Set<UUID> = []
+    @State private var decision: ParentDecision.Decision = .approved
+    @State private var confirming = false
+    @State private var expanded = false
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            VStack(alignment: .leading, spacing: 14) {
+                Button(selected.count == min(100, items.count) ? "Deselect all" : (items.count > 100 ? "Select first 100" : "Select all")) {
+                    selected = selected.count == min(100, items.count) ? [] : Set(items.prefix(100).map(\.id))
+                }
+                ForEach(items) { item in
+                    HStack(alignment: .top, spacing: 10) {
+                        Button { if !selected.insert(item.id).inserted { selected.remove(item.id) } } label: {
+                            Image(systemName: selected.contains(item.id) ? "checkmark.square.fill" : "square")
+                                .font(.title2).frame(width: 44, height: 44)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Select \(item.occurrence.dueAt.formatted(date: .abbreviated, time: .shortened))")
+                        .accessibilityValue(selected.contains(item.id) ? "Selected" : "Not selected")
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(item.occurrence.dueAt.formatted(date: .abbreviated, time: .shortened)).font(.subheadline.weight(.semibold))
+                            if let reason = item.occurrence.excuseReason {
+                                Label("Excuse requested", systemImage: "hand.raised")
+                                Text(reason)
+                            } else if let note = item.submission?.reportedDoneNote {
+                                Label("Reported done without photo", systemImage: "text.bubble")
+                                if !note.isEmpty { Text(note) }
+                            } else if item.submission?.imageName == "no-photo" {
+                                Label("Reported done", systemImage: "checkmark.bubble")
+                            } else {
+                                ReviewEvidenceThumbnail(chore: item.chore, submission: item.submission, size: 100)
+                                if let ai = item.submission?.aiResult { Text(ai.reason) }
+                            }
+                        }
+                        .font(.caption)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                if !selected.isEmpty {
+                    Text("\(selected.count) selected").font(.caption.weight(.semibold))
+                    HStack {
+                        Button { decision = .approved; confirming = true } label: { Label("Approve", systemImage: "checkmark") }
+                        Spacer()
+                        Button { decision = .excused; confirming = true } label: { Label("Excuse", systemImage: "hand.raised") }
+                        Spacer()
+                        Button { decision = .rejected; confirming = true } label: { Label("Reject", systemImage: "xmark") }
+                    }
+                    .font(.subheadline)
+                    .disabled(selected.count > 100 || store.isMutationInFlight)
+                }
+            }
+            .padding(.vertical, 12)
+        } label: {
+            if let first = items.first {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(first.chore.title).font(.headline)
+                    Text("\(first.occurrence.dueAt.formatted(date: .omitted, time: .shortened)) · \(items.count) pending")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .disabled(store.isMutationInFlight)
+        .onChange(of: items.map(\.id)) { _, ids in selected.formIntersection(ids) }
+        .onAppear {
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["CHACHING_GROUPED_EXPANDED"] == "1" {
+                expanded = true
+                selected = Set(items.prefix(2).map(\.id))
+            }
+            #endif
+        }
+        .confirmationDialog("\(decision == .approved ? "Approve" : decision == .excused ? "Excuse" : "Reject") \(selected.count) selected chores?", isPresented: $confirming, titleVisibility: .visible) {
+            Button("Confirm") {
+                let ids = Array(selected)
+                let chosenDecision = decision
+                Task {
+                    if await store.reviewChoreBatch(ids: ids, decision: chosenDecision) { selected = [] }
+                    await onSaved()
+                }
+            }
+        } message: {
+            Text(decision == .rejected ? "Deductions will remain or be applied for the selected chores." : "Any deductions for the selected chores will be restored.")
         }
     }
 }
@@ -289,6 +441,10 @@ struct ParentTaskReviewView: View {
                     if let reason = occurrence.excuseReason {
                         Label(reason, systemImage: "hand.raised")
                             .font(.subheadline)
+                    }
+                    if let note = store.submission(for: occurrence)?.reportedDoneNote {
+                        Label("Reported done without photo", systemImage: "text.bubble")
+                        if !note.isEmpty { Text(note).foregroundStyle(Color.mutedGray) }
                     }
                     ReviewCard(occurrence: occurrence, chore: chore, submission: store.submission(for: occurrence))
                     VStack(alignment: .leading, spacing: 8) {
@@ -1019,6 +1175,225 @@ struct ChoreTemplatePickerView: View {
     }
 }
 
+struct PhotoSharingStatus: Decodable {
+    let familyAuthorized: Bool
+    let userAccepted: Bool
+    var canUpload: Bool { familyAuthorized && userAccepted }
+}
+
+struct PrivacyAccountView: View {
+    @EnvironmentObject private var store: AppStore
+    @State private var consent: PhotoSharingStatus?
+    @State private var errorMessage: String?
+    @State private var showingConsent = false
+    @State private var showingDelete = false
+    @State private var deletionAccepted = false
+    @State private var needsAppleRevocation = false
+    @State private var isWorking = false
+    @State private var confirmation = ""
+
+    var body: some View {
+        Form {
+            Section("Photo sharing") {
+                Text("Photos are stored privately with Supabase, shared with your family parents, and sent to OpenAI for AI review. AI is advisory; parents make the final decision.")
+                if store.isSignedIn {
+                    if let consent {
+                        Label(consent.canUpload ? "Photo sharing authorized" : "Photo sharing needs permission", systemImage: consent.canUpload ? "checkmark.shield" : "hand.raised")
+                        if !consent.canUpload {
+                            Button("Review Photo Sharing") { showingConsent = true }
+                        }
+                        if consent.userAccepted || (store.isParentSession && consent.familyAuthorized) {
+                            Button(store.isParentSession ? "Stop Family Photo Sharing" : "Stop My Photo Sharing", role: .destructive) {
+                                Task { await revokeConsent() }
+                            }
+                        }
+                    } else if errorMessage == nil { ProgressView("Checking permissions") }
+                } else { Text("Sign in to manage photo sharing.").foregroundStyle(.secondary) }
+                Text("Stopping sharing prevents new uploads. Existing photos follow your family's deletion settings. You can still report a chore without a photo for parent review.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            Section("Privacy & support") {
+                NavigationLink("Privacy Details") { PrivacyDetailsView() }
+                Link("Privacy Policy", destination: AppBrand.privacyURL)
+                Link("Support", destination: AppBrand.supportURL)
+                Link("Email Support", destination: AppBrand.supportEmailURL)
+            }
+            if store.isSignedIn {
+                Section("Account") {
+                    Button("Sign Out") { Task { await store.signOutRemoteFamily() } }
+                    Button("Delete Account", role: .destructive) { showingDelete = true }
+                }
+            }
+            if let errorMessage {
+                Section {
+                    Text(errorMessage).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                    Button("Try Again") { Task { await loadConsent() } }
+                }
+            }
+            if deletionAccepted {
+                Section("Deletion requested") {
+                    Text("Your family access has been removed. Photo and account cleanup will continue automatically if needed.")
+                    if needsAppleRevocation {
+                        Text("Also remove ChaChing in iPhone Settings > your name > Sign in with Apple to revoke Apple's sign-in permission.")
+                    }
+                }
+            }
+        }
+        .navigationTitle("Privacy & Account")
+        .navigationBarTitleDisplayMode(.inline)
+        .disabled(isWorking)
+        .task { await loadConsent() }
+        .sheet(isPresented: $showingConsent, onDismiss: { Task { await loadConsent() } }) {
+            PhotoSharingConsentView(onAccepted: {})
+        }
+        .sheet(isPresented: $showingDelete) {
+            NavigationStack {
+                Form {
+                    Section {
+                        Text("This permanently deletes your account. This cannot be undone.").font(.headline)
+                        Text("For a child: their profile, chores, photos, savings goals, and allowance history are deleted.")
+                        Text("For a parent: another parent can continue managing the family. Shared child and allowance history stays, with your account attribution removed. If you are the last parent, the family and all its child data are deleted. Other people's sign-in accounts are not deleted.")
+                        Text("Photos are removed through an automatic cleanup queue. If a service is unavailable, deletion retries automatically.")
+                    }
+                    Section("Type DELETE to confirm") {
+                        TextField("DELETE", text: $confirmation)
+                            .textInputAutocapitalization(.characters).autocorrectionDisabled()
+                        if store.usesAppleSignIn {
+                            Text("Continue with Apple to revoke sign-in permission and delete your account. You can also delete below and remove Apple permission in Settings afterward.")
+                                .font(.footnote)
+                            SignInWithAppleButton(.continue) { request in
+                                request.requestedScopes = []
+                            } onCompletion: { result in
+                                switch result {
+                                case .success(let authorization):
+                                    let credential = authorization.credential as? ASAuthorizationAppleIDCredential
+                                    let code = credential?.authorizationCode.flatMap { String(data: $0, encoding: .utf8) }
+                                    Task { await deleteAccount(appleAuthorizationCode: code) }
+                                case .failure:
+                                    errorMessage = "Apple authorization wasn't completed. You can try again or delete your account below."
+                                }
+                            }
+                            .frame(height: 44)
+                            .disabled(confirmation != "DELETE" || isWorking)
+                        }
+                        Button(isWorking ? "Deleting..." : "Permanently Delete Account", role: .destructive) {
+                            Task { await deleteAccount() }
+                        }.disabled(confirmation != "DELETE" || isWorking)
+                    }
+                    if let errorMessage { Text(errorMessage).foregroundStyle(.red) }
+                }
+                .navigationTitle("Delete Account")
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { showingDelete = false }.disabled(isWorking) } }
+                .interactiveDismissDisabled(isWorking)
+            }
+        }
+    }
+
+    private func loadConsent() async {
+        guard store.isSignedIn else { return }
+        do { consent = try await store.photoSharingStatus(); errorMessage = nil }
+        catch { errorMessage = "Couldn't load photo permissions. Check your connection and try again." }
+    }
+
+    private func revokeConsent() async {
+        isWorking = true
+        defer { isWorking = false }
+        do { try await store.setPhotoSharingConsent(accepted: false); await loadConsent() }
+        catch { errorMessage = "Couldn't stop photo sharing. Please try again." }
+    }
+
+    private func deleteAccount(appleAuthorizationCode: String? = nil) async {
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let appleRevoked = try await store.deleteAccount(appleAuthorizationCode: appleAuthorizationCode)
+            needsAppleRevocation = !appleRevoked
+            deletionAccepted = true
+            showingDelete = false
+            confirmation = ""
+            errorMessage = nil
+        } catch {
+            errorMessage = "Couldn't confirm account deletion. Please try again. If it continues, contact support."
+        }
+    }
+}
+
+struct PhotoSharingConsentView: View {
+    @EnvironmentObject private var store: AppStore
+    @Environment(\.dismiss) private var dismiss
+    var onAccepted: () -> Void
+    @State private var status: PhotoSharingStatus?
+    @State private var isSaving = false
+    @State private var errorMessage: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Before sharing a photo") {
+                    Text("Your photo will be uploaded to Supabase and sent to OpenAI to help review the chore. Parents in your family can view it and make the final decision.")
+                    Text("Keep people and private information out of the photo. When people blocking is enabled, the app checks on your device before uploading. Detection can miss people.")
+                    Text("Photos are deleted according to your family's evidence settings. Chore status and allowance history remain after photos are deleted. AI providers may retain data under their own policies.")
+                    NavigationLink("Privacy Details") { PrivacyDetailsView() }
+                }
+                if let status {
+                    if store.isParentSession || status.familyAuthorized {
+                        Section {
+                            Button(isSaving ? "Saving..." : store.isParentSession ? "Authorize Family Photo Sharing" : "Allow Photo Sharing") {
+                                Task {
+                                    isSaving = true
+                                    defer { isSaving = false }
+                                    do {
+                                        try await store.setPhotoSharingConsent(accepted: true)
+                                        onAccepted()
+                                        dismiss()
+                                    } catch { errorMessage = "Permission wasn't saved. Please try again." }
+                                }
+                            }.disabled(isSaving)
+                        }
+                    } else {
+                        Section { Text("Ask a parent to authorize photo sharing in Family > Privacy & Account. You can report this chore without a photo for now.") }
+                    }
+                } else { ProgressView("Checking family permission") }
+                if let errorMessage { Text(errorMessage).foregroundStyle(.red) }
+            }
+            .navigationTitle("Photo Sharing")
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Not Now") { dismiss() }.disabled(isSaving) } }
+            .task {
+                do { status = try await store.photoSharingStatus() }
+                catch { errorMessage = "Couldn't check family permission. Close this screen and try again." }
+            }
+        }
+        .interactiveDismissDisabled(isSaving)
+    }
+}
+
+struct PrivacyDetailsView: View {
+    var body: some View {
+        Form {
+            Section("Your family data") {
+                Text("ChaChing stores sign-in details, family memberships, chores, reviews, savings goals, and allowance records in Supabase. Family parents can manage their children's records. Other families cannot access them.")
+            }
+            Section("Photos and AI") {
+                Text("Photos are optional evidence. A parent authorizes cloud sharing, and each person agrees before uploading. Supabase stores photos privately; OpenAI processes them for chore review. Parents can approve a no-photo report instead.")
+                Text("People detection runs on the device when enabled. It is not a guarantee. Keep faces, addresses, school details, and other private information out of photos.")
+                Text("Reviewed photos follow family and chore retention settings, including any deletion grace period. A cleanup job removes due images. Abandoned uploads become eligible for cleanup after 24 hours. Deleting a photo does not delete the chore or allowance record.")
+            }
+            Section("Reminders and location") {
+                Text("Notification permission is optional. Location reminders use locations you choose; home reminders run on your device. Chore destinations and parent alert settings are shared with your family. ChaChing does not provide continuous location tracking.")
+            }
+            Section("Deletion") {
+                Text("Delete your account from Privacy & Account. Deleting a child account deletes that child's data. Deleting a parent preserves shared family records if another parent remains; deleting the last parent removes the family and its child data. Storage cleanup retries automatically. Provider backups and processing logs follow the providers' retention policies.")
+            }
+            Section {
+                Link("OpenAI Data Controls", destination: URL(string: "https://platform.openai.com/docs/guides/your-data")!)
+                Link("Contact Support", destination: AppBrand.supportEmailURL)
+            }
+        }
+        .navigationTitle("Privacy Details")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
 struct FamilyManagementView: View {
     @EnvironmentObject private var store: AppStore
     @SceneStorage("chaching.family.childNameDraft") private var childName = "Zoe"
@@ -1033,6 +1408,14 @@ struct FamilyManagementView: View {
             VStack(alignment: .leading, spacing: 18) {
                 FamilySyncCard()
                     .environmentObject(store)
+
+                NavigationLink {
+                    PrivacyAccountView()
+                } label: {
+                    Label("Privacy & Account", systemImage: "hand.raised")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 8)
+                }
 
                 if let syncMessage = store.inviteCreationState.message {
                     Label(syncMessage, systemImage: store.inviteCreationState.iconName)

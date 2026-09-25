@@ -913,6 +913,7 @@ public struct AIReviewResult: Codable, Equatable, Sendable {
 }
 
 public struct ChoreSubmission: Identifiable, Codable, Equatable, Sendable {
+    public var reportedDoneNote: String?
     public var id: UUID
     public var taskOccurrenceId: UUID
     public var childId: UUID
@@ -928,7 +929,8 @@ public struct ChoreSubmission: Identifiable, Codable, Equatable, Sendable {
         imageName: String,
         submittedAt: Date = Date(),
         aiResult: AIReviewResult? = nil,
-        parentDecision: ParentDecision? = nil
+        parentDecision: ParentDecision? = nil,
+        reportedDoneNote: String? = nil
     ) {
         self.id = id
         self.taskOccurrenceId = taskOccurrenceId
@@ -937,6 +939,20 @@ public struct ChoreSubmission: Identifiable, Codable, Equatable, Sendable {
         self.submittedAt = submittedAt
         self.aiResult = aiResult
         self.parentDecision = parentDecision
+        self.reportedDoneNote = reportedDoneNote
+    }
+}
+
+public struct ChoreOccurrenceGroup: Identifiable {
+    public let id: String
+    public let occurrences: [TaskOccurrence]
+
+    public static func grouped(_ occurrences: [TaskOccurrence], calendar: Calendar = .current) -> [Self] {
+        Dictionary(grouping: occurrences) { task in
+            let time = calendar.dateComponents([.hour, .minute], from: task.dueAt)
+            return "\(task.childId).\(task.choreDefinitionId).\(time.hour ?? 0).\(time.minute ?? 0)"
+        }.map { Self(id: $0.key, occurrences: $0.value.sorted { ($0.dueAt, $0.id.uuidString) < ($1.dueAt, $1.id.uuidString) }) }
+            .sorted { ($0.occurrences[0].dueAt, $0.id) < ($1.occurrences[0].dueAt, $1.id) }
     }
 }
 

@@ -113,4 +113,93 @@ final class ChoreReminderPlannerTests: XCTestCase {
                                                   now: fall, calendar: calendar, days: 3)
         XCTAssertEqual(dstItems.map { calendar.component(.hour, from: $0.dueAt) }, [9, 9, 9])
     }
+
+    func testCombinedBudgetReservesCriticalAlertsAndOtherRequests() {
+        let chores = (0..<70).map {
+            ReminderQueueCandidate(id: "chore\($0)", fireAt: now.addingTimeInterval(Double($0)), priority: .chore)
+        }
+        let special: [ReminderQueueCandidate] = [
+            .init(id: "nudge", fireAt: now, priority: .immediate),
+            .init(id: "payday", fireAt: now.addingTimeInterval(604800), priority: .allowance),
+            .init(id: "catchup", fireAt: now.addingTimeInterval(3600), priority: .catchUp)
+        ]
+        let result = ChoreReminderPlanner.selectedNotificationIDs(chores + special, otherPendingCount: 5)
+        XCTAssertEqual(result.count, 55)
+        XCTAssertTrue(Set(special.map(\.id)).isSubset(of: result))
+        XCTAssertTrue(result.contains("chore51"))
+        XCTAssertFalse(result.contains("chore52"))
+        XCTAssertTrue(ChoreReminderPlanner.selectedNotificationIDs(chores, otherPendingCount: 60).isEmpty)
+    }
+
+    func testQueueDeduplicatesAndBreaksTiesDeterministically() {
+        let candidates: [ReminderQueueCandidate] = [
+            .init(id: "b", fireAt: now, priority: .chore),
+            .init(id: "a", fireAt: now, priority: .chore),
+            .init(id: "b", fireAt: now, priority: .chore)
+        ]
+        XCTAssertEqual(ChoreReminderPlanner.selectedNotificationIDs(candidates, otherPendingCount: 59), ["a"])
+        XCTAssertEqual(ChoreReminderPlanner.selectedNotificationIDs(candidates.reversed(), otherPendingCount: 58), ["a", "b"])
+    }
+
+    private func locationItem(_ id: String, due: Date? = nil, latitude: Double = 34) -> ChoreReminderItem {
+        let due = due ?? date(2026, 9, 20, 9, 0)
+        return ChoreReminderItem(id: id, choreId: UUID(), title: id, dueAt: due,
+            expiresAt: due.addingTimeInterval(5400), offsets: [15, 0],
+            location: ChoreLocation(name: "School", latitude: latitude, longitude: -118, leaveReminderMinutes: 30))
+    }
+
+    func testColocatedDestinationsShareOneRegionAndLargestRadius() {
+        let first = locationItem("first")
+        var second = locationItem("second", latitude: 34.000001)
+        second.location?.radiusMeters = 500
+        let regions = ChoreReminderPlanner.regions(items: [first, second], delays: [:], home: nil, alertedIDs: [], now: now)
+        XCTAssertEqual(regions.count, 1)
+        XCTAssertEqual(regions[0].items.count, 2)
+        XCTAssertEqual(regions[0].location.radiusMeters, 500)
+    }
+
+    func testRegionBudgetReservesHomeAheadOfDestinations() {
+        let items = (0..<25).map { locationItem("item\($0)", latitude: 34 + Double($0) / 100) }
+        let last = items.last!
+        let delays = [last.id: ChoreReminderDelay(until: last.expiresAt, atHome: true)]
+        let home = ChoreLocation(name: "Home", latitude: 35, longitude: -118)
+        let regions = ChoreReminderPlanner.regions(items: items, delays: delays, home: home,
+            alertedIDs: [], now: now, otherRegionCount: 2)
+        XCTAssertEqual(regions.count, 18)
+        XCTAssertEqual(regions.first?.homeItemIDs, [last.id])
+        XCTAssertTrue(ChoreReminderPlanner.regions(items: items, delays: delays, home: home,
+            alertedIDs: [], now: now, otherRegionCount: 20).isEmpty)
+    }
+
+    func testArrivalChecksTimeWindowAndSnoozeAtActualEntry() {
+        let current = locationItem("today")
+        let future = locationItem("tomorrow", due: date(2026, 9, 21, 9, 0))
+        let region = ChoreReminderPlanner.regions(items: [current, future], delays: [:], home: nil,
+            alertedIDs: [], now: now)[0]
+        XCTAssertTrue(ChoreReminderPlanner.arrivalItems(in: region, delays: [:], now: now).isEmpty)
+        let arrival = date(2026, 9, 20, 8, 30)
+        XCTAssertEqual(ChoreReminderPlanner.arrivalItems(in: region, delays: [:], now: arrival).map(\.id), ["today"])
+        let delays = [current.id: ChoreReminderDelay(until: arrival.addingTimeInterval(600))]
+        XCTAssertTrue(ChoreReminderPlanner.arrivalItems(in: region, delays: delays, now: arrival).isEmpty)
+        XCTAssertTrue(ChoreReminderPlanner.arrivalItems(in: region, delays: [:], now: current.expiresAt).isEmpty)
+    }
+
+    func testHomeArrivalRequiresUnexpiredActiveDeferral() {
+        let item = locationItem("home")
+        let delays = [item.id: ChoreReminderDelay(until: item.expiresAt, atHome: true)]
+        let region = ChoreReminderPlanner.regions(items: [item], delays: delays, home: item.location,
+            alertedIDs: [], now: now)[0]
+        XCTAssertEqual(ChoreReminderPlanner.arrivalItems(in: region, delays: delays, now: now).map(\.id), [item.id])
+        XCTAssertTrue(ChoreReminderPlanner.arrivalItems(in: region, delays: [:], now: now).isEmpty)
+        XCTAssertTrue(ChoreReminderPlanner.arrivalItems(in: region, delays: delays, now: item.expiresAt).isEmpty)
+    }
+
+    func testExpiredAlreadyAlertedAndInvalidDestinationsAreNotMonitored() {
+        let expired = locationItem("expired", due: now.addingTimeInterval(-7200))
+        let alerted = locationItem("alerted")
+        var invalid = locationItem("invalid")
+        invalid.location?.latitude = 100
+        XCTAssertTrue(ChoreReminderPlanner.regions(items: [expired, alerted, invalid], delays: [:], home: nil,
+            alertedIDs: [alerted.id], now: now).isEmpty)
+    }
 }
