@@ -5,6 +5,53 @@ import Supabase
 struct SupabaseRemoteStore: Sendable {
     var client: SupabaseClient = SupabaseClientProvider.shared
 
+    func fetchChorePlans(occurrenceIds: [UUID]) async throws -> [ChildChorePlan] {
+        var result: [ChildChorePlan] = []
+        for start in stride(from: 0, to: occurrenceIds.count, by: 100) {
+            let ids = occurrenceIds[start..<min(start + 100, occurrenceIds.count)].map(\.uuidString)
+            let batch: [ChildChorePlan] = try await client.from("child_chore_plans").select()
+                .in("occurrence_id", values: ids).execute().value
+            result.append(contentsOf: batch)
+        }
+        return result
+    }
+
+    func saveChorePlan(occurrenceId: UUID, plannedFor: Date?) async throws {
+        struct Parameters: Encodable { let target_occurrence_id: UUID; let target_planned_for: Date? }
+        try await client.rpc("set_child_chore_plan", params: Parameters(target_occurrence_id: occurrenceId, target_planned_for: plannedFor)).execute()
+    }
+
+    func fetchInitiativeStars(childId: UUID) async throws -> [InitiativeStar] {
+        try await client.from("initiative_stars").select().eq("child_id", value: childId.uuidString)
+            .order("created_at", ascending: false).limit(100).execute().value
+    }
+
+    func fetchStarBalance(childId: UUID) async throws -> Int {
+        try await client.rpc("initiative_star_balance", params: ["target_child_id": childId.uuidString]).execute().value
+    }
+
+    func fetchStarCreditRequests(childId: UUID) async throws -> [StarCreditRequest] {
+        try await client.from("star_credit_requests").select().eq("child_id", value: childId.uuidString)
+            .order("created_at", ascending: false).execute().value
+    }
+
+    func awardInitiativeStar(id: UUID, childId: UUID, reason: String, occurrenceId: UUID?) async throws {
+        struct Parameters: Encodable {
+            let target_id: UUID; let target_child_id: UUID; let target_reason: String; let target_occurrence_id: UUID?
+        }
+        try await client.rpc("award_initiative_star", params: Parameters(target_id: id, target_child_id: childId,
+            target_reason: reason, target_occurrence_id: occurrenceId)).execute()
+    }
+
+    func requestStarCredit(id: UUID, occurrenceId: UUID) async throws {
+        try await client.rpc("request_star_credit", params: ["target_id": id.uuidString, "target_occurrence_id": occurrenceId.uuidString]).execute()
+    }
+
+    func decideStarCredit(id: UUID, approve: Bool) async throws {
+        struct Parameters: Encodable { let target_id: UUID; let approve: Bool }
+        try await client.rpc("decide_star_credit", params: Parameters(target_id: id, approve: approve)).execute()
+    }
+
     func saveSavingsGoals(childId: UUID, goals: [SavingsGoal]) async throws {
         struct Parameters: Encodable {
             var target_child_id: UUID

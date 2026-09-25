@@ -1,5 +1,75 @@
 import Foundation
 
+public struct ChildChorePlan: Codable, Identifiable, Equatable, Sendable {
+    public var id: UUID { occurrenceId }
+    public var occurrenceId: UUID
+    public var childId: UUID
+    public var plannedFor: Date
+    public var createdAt: Date
+    public var updatedAt: Date
+    public var cancelledAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case occurrenceId = "occurrence_id", childId = "child_id", plannedFor = "planned_for"
+        case createdAt = "created_at", updatedAt = "updated_at", cancelledAt = "cancelled_at"
+    }
+}
+
+public enum ChorePlanning {
+    public static func choices(occurrences: [TaskOccurrence], chores: [ChoreDefinition], plans: [ChildChorePlan],
+                               childId: UUID, settledWeeks: Set<UUID>, now: Date, calendar: Calendar = .current) -> [TaskOccurrence] {
+        let activeChores = Set(chores.filter { $0.childId == childId && !$0.isPaused && $0.archivedAt == nil }.map(\.id))
+        let planned = Set(plans.filter { $0.childId == childId && $0.cancelledAt == nil }.map(\.occurrenceId))
+        return occurrences.filter {
+            $0.childId == childId && activeChores.contains($0.choreDefinitionId) && !settledWeeks.contains($0.weekId)
+                && ($0.status == .upcoming || $0.status == .due) && $0.dueAt > now
+                && calendar.isDate($0.dueAt, inSameDayAs: now) && !planned.contains($0.id)
+        }.sorted { ($0.dueAt, $0.id.uuidString) < ($1.dueAt, $1.id.uuidString) }.prefix(3).map { $0 }
+    }
+}
+
+public struct InitiativeStar: Codable, Identifiable, Equatable, Sendable {
+    public var id: UUID
+    public var childId: UUID
+    public var amount: Int
+    public var reason: String
+    public var occurrenceId: UUID?
+    public var createdAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case id, amount, reason
+        case childId = "child_id", occurrenceId = "occurrence_id", createdAt = "created_at"
+    }
+}
+
+public struct StarCreditRequest: Codable, Identifiable, Equatable, Sendable {
+    public var id: UUID
+    public var childId: UUID
+    public var occurrenceId: UUID
+    public var status: String
+    public var createdAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case id, status
+        case childId = "child_id", occurrenceId = "occurrence_id", createdAt = "created_at"
+    }
+}
+
+public enum InitiativeStars {
+    public static let creditCost = 5
+    public static let recognitionReasons = ["Noticed what needed doing", "Made a plan and followed through", "Remembered without a reminder", "Prepared ahead of time"]
+
+    public static func balance(_ entries: [InitiativeStar], childId: UUID) -> Int {
+        entries.filter { $0.childId == childId }.reduce(0) { $0 + $1.amount }
+    }
+
+    public static func creditEligible(_ occurrence: TaskOccurrence, entries: [LedgerEntry], settled: Bool, requests: [StarCreditRequest]) -> Bool {
+        !settled && (occurrence.status == .missed || occurrence.status == .rejected)
+            && !requests.contains { $0.occurrenceId == occurrence.id }
+            && entries.contains { $0.relatedOccurrenceId == occurrence.id && $0.type == .deduction && !$0.isVoided && $0.amountCents > 0 }
+    }
+}
+
 public struct SavingsGoal: Codable, Identifiable, Equatable, Sendable {
     public var id: UUID
     public var title: String

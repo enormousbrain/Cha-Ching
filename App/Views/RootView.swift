@@ -5,6 +5,8 @@ struct RootView: View {
 #if DEBUG
     @State private var previewReminders = ProcessInfo.processInfo.environment["CHACHING_REMINDER_SETTINGS"] == "1"
     @State private var previewPrivacy = ProcessInfo.processInfo.environment["CHACHING_PRIVACY_SETTINGS"] == "1"
+    @State private var previewStars = ProcessInfo.processInfo.environment["CHACHING_STARS"] == "1"
+    @State private var previewPlanning = ProcessInfo.processInfo.environment["CHACHING_PLANNING_PREVIEW"] != nil
 #endif
 
     var body: some View {
@@ -22,6 +24,14 @@ struct RootView: View {
         }
         .sheet(isPresented: $previewPrivacy) {
             NavigationStack { PrivacyAccountView().environmentObject(store) }
+        }
+        .sheet(isPresented: $previewStars) {
+            NavigationStack { InitiativeStarsView().environmentObject(store) }
+        }
+        .sheet(isPresented: $previewPlanning) {
+            if ProcessInfo.processInfo.environment["CHACHING_PLANNING_PREVIEW"] == "editor", let occurrence = store.planningChoices.first {
+                ChorePlanEditor(occurrence: occurrence).environmentObject(store)
+            } else { WhatsNextCheckInView().environmentObject(store) }
         }
 #endif
         .onOpenURL { url in

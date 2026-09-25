@@ -129,6 +129,11 @@ struct ParentReviewQueueView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                if store.starCreditRequests.contains(where: { $0.status == "pending" }) {
+                    NavigationLink { InitiativeStarsView() } label: {
+                        Label("\(store.childName)'s star credit requests", systemImage: "star.fill")
+                    }
+                }
                 DisclosureGroup(isExpanded: $showingAllowanceOverview) {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
@@ -208,6 +213,7 @@ struct ParentReviewQueueView: View {
         }
         .background(Color.paperWhite.ignoresSafeArea())
         .sheet(isPresented: $showingBonus) { AddBonusSheet().environmentObject(store) }
+        .toolbar { ToolbarItem(placement: .topBarTrailing) { GoldStarButton() } }
         .navigationDestination(isPresented: $showingPreviewReview) {
             if let occurrence = store.pendingReviewOccurrences.first {
                 ParentTaskReviewView(occurrenceId: occurrence.id)
@@ -304,6 +310,10 @@ struct PendingApprovalGroup: View {
                         .accessibilityValue(selected.contains(item.id) ? "Selected" : "Not selected")
                         VStack(alignment: .leading, spacing: 6) {
                             Text(item.occurrence.dueAt.formatted(date: .abbreviated, time: .shortened)).font(.subheadline.weight(.semibold))
+                            if let plan = item.plan {
+                                Label("Self-chosen plan: \(plan.plannedFor.formatted(date: .abbreviated, time: .shortened))", systemImage: "calendar.badge.checkmark")
+                                Text("Plan last saved \(plan.updatedAt.formatted(date: .abbreviated, time: .shortened))").foregroundStyle(.secondary)
+                            }
                             if let reason = item.occurrence.excuseReason {
                                 Label("Excuse requested", systemImage: "hand.raised")
                                 Text(reason)
@@ -428,6 +438,7 @@ struct ParentTaskReviewView: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
     @State private var confirmingRejection = false
+    @State private var showingRecognition = false
     var occurrenceId: UUID
 
     var body: some View {
@@ -447,6 +458,18 @@ struct ParentTaskReviewView: View {
                         if !note.isEmpty { Text(note).foregroundStyle(Color.mutedGray) }
                     }
                     ReviewCard(occurrence: occurrence, chore: chore, submission: store.submission(for: occurrence))
+                    if let plan = store.chorePlans.first(where: { $0.occurrenceId == occurrence.id && $0.cancelledAt == nil }) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("Self-chosen plan", systemImage: "calendar.badge.checkmark").font(.headline)
+                            Text("Planned for \(plan.plannedFor.formatted(date: .abbreviated, time: .shortened))")
+                            Text("Last saved \(plan.updatedAt.formatted(date: .abbreviated, time: .shortened))")
+                                .font(.caption).foregroundStyle(.secondary)
+                            if occurrence.status == .approved {
+                                Button { showingRecognition = true } label: { Label("Recognize initiative", systemImage: "star") }
+                                    .disabled(store.initiativeStars.contains { $0.occurrenceId == occurrence.id && $0.amount > 0 })
+                            }
+                        }
+                    }
                     VStack(alignment: .leading, spacing: 8) {
                         Text("What was expected").font(.headline)
                         Text(chore.instructions).font(.body).foregroundStyle(Color.mutedGray)
@@ -463,6 +486,7 @@ struct ParentTaskReviewView: View {
         }
         .background(Color.paperWhite.ignoresSafeArea())
         .navigationTitle("Task review")
+        .sheet(isPresented: $showingRecognition) { AwardInitiativeStarSheet(occurrenceId: occurrenceId).environmentObject(store) }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
         .safeAreaInset(edge: .bottom) {

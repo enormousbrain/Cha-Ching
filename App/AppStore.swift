@@ -35,6 +35,10 @@ final class AppStore: ObservableObject {
     @Published var reminderOccurrenceId: UUID?
     @Published var showingCatchUp = false
     @Published private(set) var savingsGoals: [SavingsGoal] = []
+    @Published private(set) var initiativeStars: [InitiativeStar] = []
+    @Published private(set) var starCreditRequests: [StarCreditRequest] = []
+    @Published private(set) var starBalance = 0
+    @Published private(set) var chorePlans: [ChildChorePlan] = []
     @Published var familySyncState: FamilySyncState
     @Published var mutationFailure: MutationFailure?
     @Published private(set) var activeMutationTitle: String?
@@ -239,6 +243,7 @@ final class AppStore: ObservableObject {
         let chore: ChoreDefinition
         let childName: String
         let submission: ChoreSubmission?
+        var plan: ChildChorePlan? = nil
     }
 
     func loadFamilyPendingReviews() async throws -> [FamilyReviewItem] {
@@ -257,6 +262,7 @@ final class AppStore: ObservableObject {
         let tasks = try await remoteStore.fetchPendingOccurrences(childIds: profiles.map(\.id))
         let definitions = try await remoteStore.fetchChores(familyId: requestedFamily)
         let photos = try await remoteStore.fetchSubmissions(ids: tasks.compactMap(\.submissionId))
+        let plans = try await remoteStore.fetchChorePlans(occurrenceIds: tasks.map(\.id))
         let settled = Set(try await remoteStore.fetchAllowanceSettlements(weekIds: Array(Set(tasks.map(\.weekId)))).map(\.weekId))
         guard familyId == requestedFamily, session.userId == requestedUser, isParentSession else { throw CancellationError() }
         return tasks.filter { !settled.contains($0.weekId) }.compactMap { task in
@@ -264,7 +270,8 @@ final class AppStore: ObservableObject {
                   let child = profiles.first(where: { $0.id == task.childId }) else { return nil }
             return FamilyReviewItem(occurrence: localOccurrence(from: task), chore: localChoreDefinition(from: chore),
                 childName: child.displayName,
-                submission: photos.first(where: { $0.id == task.submissionId }).map { localSubmission(from: $0) })
+                submission: photos.first(where: { $0.id == task.submissionId }).map { localSubmission(from: $0) },
+                plan: plans.first { $0.occurrenceId == task.id && $0.cancelledAt == nil })
         }
     }
 
@@ -1183,6 +1190,105 @@ final class AppStore: ObservableObject {
         )
     }
 
+    var starCreditEligibleOccurrences: [TaskOccurrence] {
+        occurrences.filter { occurrence in
+            let entries = occurrence.weekId == weekId ? ledger : allowancePeriods.first { $0.id == occurrence.weekId }?.entries ?? []
+            return occurrence.childId == childId && InitiativeStars.creditEligible(occurrence, entries: entries,
+                settled: allowanceSettlements[occurrence.weekId] != nil, requests: starCreditRequests)
+        }.sorted { $0.dueAt > $1.dueAt }
+    }
+
+    var planningChoices: [TaskOccurrence] {
+        ChorePlanning.choices(occurrences: occurrences, chores: chores, plans: chorePlans, childId: childId,
+            settledWeeks: Set(allowanceSettlements.keys), now: Date())
+    }
+
+    var activeChorePlans: [ChildChorePlan] {
+        chorePlans.filter { plan in
+            plan.childId == childId && plan.cancelledAt == nil && occurrences.contains {
+                $0.id == plan.occurrenceId && ($0.status == .upcoming || $0.status == .due) && $0.expiresAt > Date()
+                    && allowanceSettlements[$0.weekId] == nil
+            }
+        }.sorted { ($0.plannedFor, $0.id.uuidString) < ($1.plannedFor, $1.id.uuidString) }
+    }
+
+    func saveChorePlan(occurrenceId: UUID, plannedFor: Date?) async -> Bool {
+        guard isChildSession, let occurrence = occurrences.first(where: { $0.id == occurrenceId }), occurrence.childId == childId else { return false }
+        let child = childId
+        let saved = await commitMutation(actionTitle: plannedFor == nil ? "Clear plan" : "Save plan", successMessage: "Your plan is saved.", remoteSave: {
+            try await remoteStore.saveChorePlan(occurrenceId: occurrenceId, plannedFor: plannedFor)
+        }, localCommit: {
+            guard childId == child else { return }
+            let existing = chorePlans.first { $0.id == occurrenceId }
+            chorePlans.removeAll { $0.id == occurrenceId }
+            if let plannedFor {
+                chorePlans.append(ChildChorePlan(occurrenceId: occurrenceId, childId: child, plannedFor: plannedFor,
+                    createdAt: existing?.createdAt ?? Date(), updatedAt: Date()))
+            } else if var existing {
+                existing.cancelledAt = Date()
+                existing.updatedAt = Date()
+                chorePlans.append(existing)
+            }
+        })
+        if saved { await refreshRemoteFamilyState() }
+        return saved
+    }
+
+    func awardStar(id: UUID, reason: String, occurrenceId: UUID?) async -> Bool {
+        let reason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isParentSession, !reason.isEmpty, reason.count <= 240 else { return false }
+        let child = childId
+        let saved = await commitMutation(actionTitle: "Award star", successMessage: "Initiative recognized.", remoteSave: {
+            try await remoteStore.awardInitiativeStar(id: id, childId: child, reason: reason, occurrenceId: occurrenceId)
+        }, localCommit: {
+            guard childId == child, !initiativeStars.contains(where: { $0.id == id }) else { return }
+            initiativeStars.insert(InitiativeStar(id: id, childId: child, amount: 1, reason: reason,
+                occurrenceId: occurrenceId, createdAt: Date()), at: 0)
+            starBalance += 1
+        })
+        if saved { await refreshRemoteFamilyState() }
+        return saved
+    }
+
+    func requestStarCredit(id: UUID, occurrenceId: UUID) async -> Bool {
+        guard starBalance >= InitiativeStars.creditCost,
+              starCreditEligibleOccurrences.contains(where: { $0.id == occurrenceId }) else { return false }
+        let child = childId
+        let saved = await commitMutation(actionTitle: "Request credit", successMessage: "Credit sent for parent approval.", remoteSave: {
+            try await remoteStore.requestStarCredit(id: id, occurrenceId: occurrenceId)
+        }, localCommit: {
+            guard childId == child, !starCreditRequests.contains(where: { $0.id == id }) else { return }
+            starCreditRequests.insert(StarCreditRequest(id: id, childId: child, occurrenceId: occurrenceId,
+                status: "pending", createdAt: Date()), at: 0)
+        })
+        if saved { await refreshRemoteFamilyState() }
+        return saved
+    }
+
+    func decideStarCredit(_ request: StarCreditRequest, approve: Bool) async -> Bool {
+        guard isParentSession, request.childId == childId, request.status == "pending" else { return false }
+        let child = childId
+        let saved = await commitMutation(actionTitle: "Review credit", successMessage: "Credit decision saved.", remoteSave: {
+            try await remoteStore.decideStarCredit(id: request.id, approve: approve)
+        }, localCommit: {
+            guard childId == child else { return }
+            if let index = starCreditRequests.firstIndex(where: { $0.id == request.id }) {
+                starCreditRequests[index].status = approve ? "approved" : "declined"
+            }
+            if approve {
+                starBalance -= InitiativeStars.creditCost
+                initiativeStars.insert(InitiativeStar(id: request.id, childId: child, amount: -InitiativeStars.creditCost,
+                    reason: "Missed-chore credit", occurrenceId: request.occurrenceId, createdAt: Date()), at: 0)
+                for index in ledger.indices where ledger[index].relatedOccurrenceId == request.occurrenceId && ledger[index].type == .deduction {
+                    ledger[index].isVoided = true
+                }
+                publishWidgetSnapshot()
+            }
+        })
+        if saved { await refreshRemoteFamilyState() }
+        return saved
+    }
+
     func saveSavingsGoals(_ goals: [SavingsGoal]) async -> Bool {
         guard isChildSession, goals.count <= 5, goals.allSatisfy(\.isValid) else { return false }
         return await commitMutation(
@@ -1680,6 +1786,10 @@ final class AppStore: ObservableObject {
 
     private func applyLocalPreviewState() {
         savingsGoals = []
+        initiativeStars = []
+        starCreditRequests = []
+        starBalance = 0
+        chorePlans = []
         let snapshot = SeedData.emptySnapshot()
         familyId = snapshot.familyId
         parentId = snapshot.parentId
@@ -1758,8 +1868,12 @@ final class AppStore: ObservableObject {
         let choreRecords = try await remoteStore.fetchChores(familyId: membership.familyId)
         let reviewWeekIds = weekRecords.filter { $0.id == weekRecord.id || settlements[$0.id] == nil }.map(\.id)
         let occurrenceRecords = try await remoteStore.fetchOccurrences(weekIds: reviewWeekIds)
+        let planRecords = try await remoteStore.fetchChorePlans(occurrenceIds: occurrenceRecords.map(\.id))
         let submissionRecords = try await remoteStore.fetchChoreSubmissions(childId: selectedChildProfile.id)
         let ledgerRecords = try await remoteStore.fetchLedger(childId: selectedChildProfile.id)
+        let starRecords = try await remoteStore.fetchInitiativeStars(childId: selectedChildProfile.id)
+        let creditRecords = try await remoteStore.fetchStarCreditRequests(childId: selectedChildProfile.id)
+        let remoteStarBalance = try await remoteStore.fetchStarBalance(childId: selectedChildProfile.id)
         let localLedgerEntries = ledgerRecords.map { localLedgerEntry(from: $0) }
         let entriesByWeek = Dictionary(grouping: localLedgerEntries, by: \.weekId)
 
@@ -1782,6 +1896,10 @@ final class AppStore: ObservableObject {
         familyName = familyRecord.name
         childName = selectedChildProfile.displayName
         savingsGoals = profileRecords.first { $0.id == selectedChildProfile.id }?.savingsGoals ?? []
+        initiativeStars = starRecords
+        starCreditRequests = creditRecords
+        starBalance = remoteStarBalance
+        chorePlans = planRecords
 
         let parentMember = memberRecords.first { $0.role == FamilyMemberRole.parent.rawValue }
         parentId = parentMember?.userId ?? (role == .parent ? authUserId : parentId)

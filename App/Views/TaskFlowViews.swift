@@ -7,6 +7,7 @@ struct TaskDetailView: View {
 
     @State private var isSubmittingWithoutPhoto = false
     @State private var showingNoPhotoClaim = false
+    @State private var showingPlanEditor = false
 
     private var occurrence: TaskOccurrence? {
         store.occurrences.first { $0.id == occurrenceId }
@@ -20,6 +21,22 @@ struct TaskDetailView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 22) {
                         taskHero(chore: chore)
+
+                        if let plan = store.chorePlans.first(where: { $0.occurrenceId == occurrence.id && $0.cancelledAt == nil }) {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Label("Your plan: \(plan.plannedFor.formatted(date: .abbreviated, time: .shortened))", systemImage: "calendar.badge.checkmark")
+                                if store.isChildSession && occurrence.status.isOpen {
+                                    HStack {
+                                        if occurrence.dueAt > Date() { Button("Change plan") { showingPlanEditor = true } }
+                                        Spacer()
+                                        Button("Clear plan") { Task { _ = await store.saveChorePlan(occurrenceId: occurrence.id, plannedFor: nil) } }
+                                    }
+                                    .disabled(store.isMutationInFlight)
+                                }
+                            }
+                        } else if store.isChildSession && occurrence.status.isOpen && occurrence.dueAt > Date() {
+                            Button { showingPlanEditor = true } label: { Label("Make my plan", systemImage: "calendar.badge.plus") }
+                        }
 
                         if occurrence.status == .missed {
                             Text("You can still submit this chore. Your parent will review it before restoring any deduction.")
@@ -108,6 +125,7 @@ struct TaskDetailView: View {
                 }
                 .background(Color.paperWhite.ignoresSafeArea())
                 .navigationTitle("Task Detail")
+                .sheet(isPresented: $showingPlanEditor) { ChorePlanEditor(occurrence: occurrence).environmentObject(store) }
                 .navigationBarTitleDisplayMode(.inline)
             } else {
                 ContentUnavailableView("Task not found", systemImage: "questionmark.circle")

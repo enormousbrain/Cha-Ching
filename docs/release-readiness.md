@@ -1,6 +1,6 @@
 # Release Readiness
 
-Updated September 24, 2026. This is a release gate, not a list of completed features.
+Updated September 25, 2026. This is a release gate, not a list of completed features.
 
 ## Implemented, Awaiting Device Verification
 
@@ -10,6 +10,9 @@ Updated September 24, 2026. This is a release gate, not a list of completed feat
 - Template imports stop on failure, preserve unfinished selections, and reuse IDs during retries within the same sheet. Successful entries are removed from the selection. Closing and reopening the sheet is not a durable import retry mechanism.
 
 ## Required Before Public Release
+
+- [ ] Verify [initiative stars and credit approvals](initiative-and-independence.md) on separate parent/child phones. Stars recognize independence, not app engagement; migration 0025 is deployed.
+- [ ] Verify self-chosen plans across child/parent devices, including changing/clearing a plan, submission, parent review context, and recognition. Migration 0026 is deployed; existing notifications are unchanged.
 
 - [ ] Publish a new build with the crash fix and verify background execution on physical devices; monitor new crash reports.
 - [ ] Verify two-child switching during polling, relaunch, failed requests, and sign-out. Add AppStore integration tests for refresh ordering and mutation/refresh overlap; current selection tests cover only the core selection policy.
@@ -31,7 +34,7 @@ Updated September 24, 2026. This is a release gate, not a list of completed feat
 
 ## Verification This Pass
 
-- Swift package: 49 tests passed, including reminder budgets/arrival windows, grouped catch-up, parent selection persistence policy, family scoping, deleted preference fallback, and child linkage isolation.
+- Swift package: 55 tests passed, including planning choices, star balance/credit eligibility, reminder budgets/arrival windows, grouped catch-up, parent selection persistence policy, family scoping, deleted preference fallback, and child linkage isolation.
 - iOS Simulator Debug and Release builds passed; reminder settings were visually checked in light and dark mode.
 - Privacy/account deletion migration 0024 and backend functions were deployed during the preceding privacy slice. This reminder slice requires no database migration. No TestFlight upload was performed.
 - Template partial-failure UI and physical-device background behavior still need manual verification.

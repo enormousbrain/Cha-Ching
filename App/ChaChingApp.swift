@@ -10,7 +10,17 @@ struct ChaChingApp: App {
     init() {
         let store: AppStore
         #if DEBUG
-        if let preview = ProcessInfo.processInfo.environment["CHACHING_GROUPED_PREVIEW"], ["child", "parent"].contains(preview) {
+        if ProcessInfo.processInfo.environment["CHACHING_PLANNING_PREVIEW"] != nil {
+            var snapshot = SeedData.snapshot()
+            snapshot.occurrences = snapshot.chores.prefix(3).enumerated().map { index, chore in
+                let due = Date().addingTimeInterval(Double(index + 1) * 1800)
+                return TaskOccurrence(choreDefinitionId: chore.id, childId: snapshot.childId, weekId: snapshot.weekId,
+                    scheduledAt: due, dueAt: due, expiresAt: due.addingTimeInterval(5400), status: .upcoming)
+            }
+            snapshot.submissions = []
+            store = AppStore(snapshot: snapshot)
+            store.switchSession(to: .child)
+        } else if let preview = ProcessInfo.processInfo.environment["CHACHING_GROUPED_PREVIEW"], ["child", "parent"].contains(preview) {
             var snapshot = SeedData.snapshot()
             snapshot.occurrences = snapshot.chores.prefix(2).flatMap { chore in
                 (1...3).map { day in
